@@ -64,9 +64,17 @@ describe('viewtrace local-only boundary (subprocess + network sentinel)', () => 
     const canary = join(cwdSandbox, 'canary.txt');
     await writeFile(canary, 'untouched');
 
+    // os.homedir() reads HOME on POSIX and USERPROFILE on Windows; both are
+    // set so the faked home is honored on either platform.
+    const homeEnv = {
+      HOME: fakeHome,
+      USERPROFILE: fakeHome,
+      PATH: process.env['PATH'] ?? '',
+    };
+
     const ingest = await runWithSentinel(
       ['ingest', viewtraceFixture('research-normal.jsonl'), '--data-root', dataRoot],
-      { HOME: fakeHome, PATH: process.env['PATH'] ?? '', TMPDIR: sandbox },
+      { ...homeEnv, TMPDIR: sandbox },
     );
     assert.equal(ingest.code, 0, `ingest failed: ${ingest.stderr}`);
     assert.ok(ingest.report !== null);
@@ -76,7 +84,7 @@ describe('viewtrace local-only boundary (subprocess + network sentinel)', () => 
 
     const runs = await runWithSentinel(
       ['runs', '--data-root', dataRoot, '--json'],
-      { HOME: fakeHome, PATH: process.env['PATH'] ?? '' },
+      homeEnv,
     );
     assert.equal(runs.code, 0);
     assert.ok(runs.report === null || runs.report.violations.length === 0);
@@ -84,7 +92,7 @@ describe('viewtrace local-only boundary (subprocess + network sentinel)', () => 
 
     const replay = await runWithSentinel(
       ['replay', 'research-normal-001', '--data-root', dataRoot, '--json'],
-      { HOME: fakeHome, PATH: process.env['PATH'] ?? '' },
+      homeEnv,
     );
     assert.equal(replay.code, 0);
     assert.ok(replay.stdout.includes('evt-recommend-001'));
@@ -100,7 +108,11 @@ describe('viewtrace local-only boundary (subprocess + network sentinel)', () => 
     await mkdir(fakeHome, { recursive: true });
     const result = await runWithSentinel(
       ['ingest', viewtraceFixture('research-normal.jsonl')],
-      { HOME: fakeHome, PATH: process.env['PATH'] ?? '' },
+      {
+        HOME: fakeHome,
+        USERPROFILE: fakeHome, // os.homedir() on Windows reads USERPROFILE, not HOME
+        PATH: process.env['PATH'] ?? '',
+      },
     );
     assert.equal(result.code, 0, result.stderr);
     assert.ok(existsSync(join(fakeHome, '.viewtrace', 'viewtrace.db')));

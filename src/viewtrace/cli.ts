@@ -1,33 +1,39 @@
 #!/usr/bin/env node
 /**
- * viewtrace — CLI entry point for ViewTrace AI (M0 foundation scope).
+ * viewtrace — CLI entry point for ViewTrace AI (M1: live CLI trace).
  *
- * M0 provides: --help/--version, batch ingest of reference JSONL traces,
- * run listing, replay and the adapter capability matrix.
- * Live collection (up/run/status/down) lands in M1; the local report
- * server (open) lands in M2 — those commands explicitly report themselves
- * as not implemented instead of pretending.
+ * M0 provided batch ingest of reference JSONL traces; M1 adds the collector
+ * lifecycle (up/status/down), wrapped reference-producer runs with live
+ * terminal activity, and honest exit codes. The local report server (`open`)
+ * is still M2 — `open latest` verifies the run but never prints a URL.
  */
 
-import { readFileSync, existsSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
+
+import { controlRequest, probeService } from './control.js';
+import { getAdapter, REFERENCE_ADAPTER_ID } from './adapters.js';
 import { ingestFile } from './ingest.js';
+import { runCommand } from './run.js';
+import {
+  liveDir,
+  logsDir,
+  pidAlive,
+  readServiceFile,
+  removeServiceFile,
+  serviceLockFile,
+  writeServiceFile,
+} from './servestate.js';
 import { ViewTraceStore } from './store.js';
 import { listAdapters } from './adapters.js';
 
 const PROGRAM = 'viewtrace';
 const PRODUCT = 'ViewTrace AI';
 const TAGLINE = 'Trace the evidence behind AI answers.';
-
-const NOT_IMPLEMENTED: Readonly<Record<string, string>> = {
-  up: 'live collector service (planned for M1)',
-  down: 'collector shutdown (planned for M1)',
-  status: 'collector status (planned for M1)',
-  run: 'wrapped live agent runs (planned for M1)',
-  open: 'local report server UI (planned for M2)',
-};
 
 const HELP = `${PRODUCT} — ${TAGLINE}
 
@@ -36,34 +42,65 @@ read, claimed, compared, contradicted, verified and recommended — with the
 provenance of every record kept honest (agent-reported / observed / inferred).
 
 Privacy and storage:
-  - Local-only. All data lives under the data root (default: ~/.viewtrace).
-    ViewTrace makes ZERO external network requests — no cloud, no accounts,
-    no telemetry, no API keys.
-  - Original agent history files are read-only inputs and are never modified.
-  - Private reasoning (thinking/analysis payloads) is never collected.
-  - To delete everything ViewTrace recorded, remove the data root directory.
+  - Local-only. All data lives under the data root (default: ~/.viewtrace):
+      viewtrace.db            authoritative SQLite store
+      runs/<runId>/trace.jsonl  derived replay export
+      live/<runId>/stream.jsonl spool of sanitized producer stdout
+      service.json|service.lock collector state (loopback port + token)
+      logs/service.log        collector log (never contains the token)
+  - The runtime makes ZERO external network requests — no cloud, no
+    accounts, no telemetry, no API keys. The control channel binds
+    127.0.0.1 only and requires a per-process token.
+  - Original agent history files are read-only inputs and are never
+    modified. Private reasoning (thinking/analysis payloads) is stripped
+    before anything is written to disk. Delete the data root to erase
+    everything ViewTrace recorded.
 
-Commands:
+Collector lifecycle:
+  viewtrace up [--data-root <dir>] [--json]
+      Start (or confirm) the background collector service and wait for
+      readiness. Idempotent — safe to run repeatedly.
+  viewtrace status [--data-root <dir>] [--json]
+      Distinguish a ready collector from stale state (dead pid, dead port,
+      identity mismatch). Exit 0 only when actually running.
+  viewtrace down [--data-root <dir>]
+      Ask the authenticated collector to shut down and wait for the exit.
+      Never kills processes by pid; committed events are preserved.
+
+Live runs (M1 supports the reference JSONL adapter only):
+  viewtrace run [--adapter <id>] [--json] [--latency-log <file>] \\
+                [--data-root <dir>] -- <producer command> [args...]
+      Wrap an explicit producer. Producer contract: one ViewTrace JSON
+      record per newline-terminated stdout line; human-readable output
+      belongs on stderr (stdout chatter counts as input loss and makes the
+      run PARTIAL). The producer receives its identity in the environment:
+      VIEWTRACE_RUN_ID and VIEWTRACE_DATA_ROOT. Its arguments are passed
+      verbatim — there is never a shell in between. Windows .cmd/.bat
+      producers are run via cmd.exe with quoted arguments.
+      Activity, provenance labels (reported/observed/inferred), warnings
+      and the real terminal state are shown live; output is plain text
+      with no ANSI escapes (identical when piped).
+
+Batch/query (M0 commands, unchanged):
   viewtrace ingest <file.jsonl> [--data-root <dir>] [--json]
-      Validate a reference JSONL trace, store it in SQLite, then close,
-      reopen and verify the replay is identical.
   viewtrace runs [--data-root <dir>] [--json]
-      List stored runs with lifecycle and collection completeness.
   viewtrace replay <runId> [--data-root <dir>] [--json]
-      Print the stored replay: canonical records, diagnostics, duplicates.
   viewtrace adapters [--json]
-      Show the adapter capability matrix (honest YES/PARTIAL/NO/UNKNOWN).
-  viewtrace --help | -h
-      Show this help.
-  viewtrace --version | -V
-      Show the version.
 
-not implemented yet (explicitly):
-  viewtrace up       live collector service — planned for M1
-  viewtrace down     collector shutdown — planned for M1
-  viewtrace status   collector status — planned for M1
-  viewtrace run      wrapped live agent runs — planned for M1
-  viewtrace open     local report server — planned for M2
+Report (M2 scope):
+  viewtrace open latest
+      Confirms the latest run exists and where it is stored. The local
+      report server itself ships in M2 — this intentionally opens nothing
+      and exits 3 until then.
+
+Exit codes:
+  0  success   1  runtime failure / not running / unknown run
+  2  usage, unsupported adapter, or collector not running (for run)
+  3  feature not implemented yet (report server)
+  4  producer exited 0 but the collection is PARTIAL/UNKNOWN or unconfirmed
+  127 producer could not be spawned
+  130/143  cancelled by SIGINT/SIGTERM (a CANCELLED record is committed)
+  otherwise the producer's own nonzero exit code is preserved.
 
 Compatibility: the legacy 'agent-pigeon' bin and its commands are unchanged.
 `;
@@ -72,7 +109,7 @@ function resolveVersion(): string {
   const here = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     join(here, '..', '..', '..', 'package.json'), // repo: dist/src/viewtrace/
-    join(here, '..', 'package.json'), // packed: <pkg>/dist/src/viewtrace -> up 2 = <pkg>/dist? no
+    join(here, '..', 'package.json'),
     join(here, '..', '..', 'package.json'),
   ];
   for (const candidate of candidates) {
@@ -105,28 +142,34 @@ interface CliArgs {
   flags: Map<string, string | boolean>;
 }
 
-function parseArgs(argv: readonly string[]): CliArgs {
+const VALUE_FLAGS = new Set(['--data-root', '--adapter', '--latency-log']);
+const BOOLEAN_FLAGS = new Set(['--json']);
+
+function parseArgs(argv: readonly string[], allowUnknown = false): CliArgs {
   const positional: string[] = [];
   const flags = new Map<string, string | boolean>();
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] as string;
-    if (arg === '--json') {
-      flags.set('json', true);
-      continue;
-    }
-    if (arg === '--data-root') {
+    if (VALUE_FLAGS.has(arg)) {
       const next = argv[i + 1];
       if (next === undefined || next.startsWith('--')) {
-        process.stderr.write(`${PROGRAM}: --data-root requires a directory argument\n`);
+        process.stderr.write(`${PROGRAM}: ${arg} requires a value\n`);
         process.exit(2);
       }
-      flags.set('data-root', next);
+      flags.set(arg.slice(2), next);
       i += 1;
       continue;
     }
+    if (BOOLEAN_FLAGS.has(arg)) {
+      flags.set(arg.slice(2), true);
+      continue;
+    }
     if (arg.startsWith('--')) {
-      process.stderr.write(`${PROGRAM}: unknown option ${arg}\n`);
-      process.exit(2);
+      if (!allowUnknown) {
+        process.stderr.write(`${PROGRAM}: unknown option ${arg}\n`);
+        process.exit(2);
+      }
+      continue;
     }
     positional.push(arg);
   }
@@ -137,6 +180,259 @@ function dataRootOf(flags: CliArgs['flags']): string {
   const value = flags.get('data-root');
   return typeof value === 'string' ? value : defaultDataRoot();
 }
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+}
+
+/* ------------------------------------------------------------------ */
+/* Collector lifecycle commands                                        */
+/* ------------------------------------------------------------------ */
+
+async function ensureRootDirs(dataRoot: string): Promise<void> {
+  await mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  await mkdir(liveDir(dataRoot), { recursive: true, mode: 0o700 });
+  await mkdir(logsDir(dataRoot), { recursive: true, mode: 0o700 });
+}
+
+async function cmdUp(dataRoot: string, json: boolean): Promise<number> {
+  const existing = await readServiceFile(dataRoot);
+  if (existing !== null) {
+    const probe = await probeService(existing);
+    if (probe.state === 'running') {
+      // Repair any identity drift in the state file from live health data
+      // (best-effort: a concurrent writer or the service heartbeat may
+      // already have restored it).
+      try {
+        await writeServiceFile(dataRoot, {
+          ...existing,
+          pid: probe.health.pid,
+          bootId: probe.health.bootId,
+          port: probe.info.port,
+        });
+      } catch {
+        /* repair is cosmetic; the running service heartbeat heals the file */
+      }
+      if (json) {
+        process.stdout.write(
+          JSON.stringify({ running: true, alreadyRunning: true, pid: probe.health.pid, dataRoot }) + '\n',
+        );
+      } else {
+        process.stdout.write(`collector already running (pid ${probe.health.pid}) — nothing to do\n`);
+      }
+      return 0;
+    }
+  }
+
+  await ensureRootDirs(dataRoot);
+  const serviceJs = join(dirname(fileURLToPath(import.meta.url)), 'service.js');
+  const child = spawn(process.execPath, [serviceJs, '--data-root', dataRoot], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const info = await readServiceFile(dataRoot);
+    if (info !== null) {
+      const probe = await probeService(info);
+      if (probe.state === 'running') {
+        if (json) {
+          process.stdout.write(JSON.stringify({ running: true, pid: probe.health.pid, dataRoot }) + '\n');
+        } else {
+          process.stdout.write(`collector up: pid ${probe.health.pid} (127.0.0.1:${probe.info.port})\n`);
+          process.stdout.write(`  data root: ${dataRoot}\n`);
+          process.stdout.write(`  log:       ${join(logsDir(dataRoot), 'service.log')}\n`);
+        }
+        return 0;
+      }
+    }
+    await sleep(100);
+  }
+  process.stderr.write(
+    `${PROGRAM}: collector did not become ready within 30s; see ${join(logsDir(dataRoot), 'service.log')}\n`,
+  );
+  return 1;
+}
+
+async function cmdStatus(dataRoot: string, json: boolean): Promise<number> {
+  const info = await readServiceFile(dataRoot);
+  if (info === null) {
+    if (json) process.stdout.write(JSON.stringify({ running: false, reason: 'no-service-state' }) + '\n');
+    else process.stdout.write('collector not running (no service state found)\n');
+    return 1;
+  }
+  const probe = await probeService(info);
+  if (probe.state !== 'running') {
+    if (json) process.stdout.write(JSON.stringify({ running: false, reason: 'stale', detail: probe.reason }) + '\n');
+    else process.stdout.write(`collector not running (stale state: ${probe.reason})\n`);
+    return 1;
+  }
+  let runs: { runs?: unknown[] } | null = null;
+  try {
+    const res = await controlRequest({
+      port: probe.info.port,
+      token: probe.info.token,
+      method: 'GET',
+      path: '/runs',
+      timeoutMs: 3000,
+    });
+    runs = res.status === 200 ? (res.json as { runs?: unknown[] }) : null;
+  } catch {
+    runs = null;
+  }
+  if (json) {
+    process.stdout.write(
+      JSON.stringify({
+        running: true,
+        pid: probe.health.pid,
+        uptimeMs: probe.health.uptimeMs,
+        boundAddress: probe.health.boundAddress,
+        dataRoot,
+        runs: runs?.runs ?? null,
+      }) + '\n',
+    );
+  } else {
+    process.stdout.write(`collector running: pid ${probe.health.pid}, up ${Math.round(probe.health.uptimeMs / 1000)}s\n`);
+    process.stdout.write(`  data root: ${dataRoot}\n`);
+    const list = Array.isArray(runs?.runs) ? (runs?.runs as { runId: string; lifecycle: string; completeness: string; pendingBytes: number }[]) : [];
+    if (list.length === 0) process.stdout.write('  runs: none recorded on this root\n');
+    for (const run of list) {
+      process.stdout.write(
+        `  run ${run.runId}  ${run.lifecycle}  completeness=${run.completeness}  pending=${run.pendingBytes}B\n`,
+      );
+    }
+  }
+  return 0;
+}
+
+async function cmdDown(dataRoot: string): Promise<number> {
+  const info = await readServiceFile(dataRoot);
+  if (info === null) {
+    await cleanStaleLock(dataRoot);
+    process.stdout.write('collector not running — nothing to stop\n');
+    return 0;
+  }
+  const probe = await probeService(info);
+  if (probe.state !== 'running') {
+    // Stale state: clean the files, never signal a pid.
+    await removeServiceFile(dataRoot);
+    await cleanStaleLock(dataRoot);
+    process.stdout.write(`collector not running (stale state: ${probe.reason}) — cleaned\n`);
+    return 0;
+  }
+  try {
+    const res = await controlRequest({
+      port: probe.info.port,
+      token: probe.info.token,
+      method: 'POST',
+      path: '/shutdown',
+      timeoutMs: 5000,
+    });
+    if (res.status !== 200) {
+      process.stderr.write(`${PROGRAM}: shutdown request failed (HTTP ${res.status})\n`);
+      return 1;
+    }
+  } catch (e) {
+    process.stderr.write(`${PROGRAM}: shutdown request failed (${e instanceof Error ? e.message : String(e)})\n`);
+    return 1;
+  }
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline && pidAlive(info.pid)) {
+    await sleep(100);
+  }
+  if (pidAlive(info.pid)) {
+    process.stderr.write(`${PROGRAM}: collector pid ${info.pid} did not exit within 10s\n`);
+    return 1;
+  }
+  await removeServiceFile(dataRoot).catch(() => undefined);
+  await cleanStaleLock(dataRoot);
+  process.stdout.write('collector stopped; committed runs are preserved\n');
+  return 0;
+}
+
+async function cleanStaleLock(dataRoot: string): Promise<void> {
+  try {
+    const text = await readFile(serviceLockFile(dataRoot), 'utf8');
+    const pid = Number(text.trim());
+    if (Number.isInteger(pid) && pid !== process.pid && !pidAlive(pid)) {
+      await rm(serviceLockFile(dataRoot), { force: true });
+    }
+  } catch {
+    /* no lock file */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Query commands (read-only store connections)                        */
+/* ------------------------------------------------------------------ */
+
+async function cmdRuns(dataRoot: string, json: boolean): Promise<number> {
+  const store = await ViewTraceStore.openQuery(dataRoot);
+  try {
+    const runs = store === null ? [] : store.listRuns();
+    if (json) {
+      process.stdout.write(JSON.stringify(runs, null, 2) + '\n');
+    } else {
+      if (runs.length === 0) process.stdout.write('no stored runs\n');
+      for (const run of runs) {
+        process.stdout.write(
+          `${run.runId}  ${run.lifecycle}  completeness=${run.completeness}  events=${run.eventCount}  adapter=${run.adapterId}@${run.adapterVersion}\n`,
+        );
+      }
+    }
+  } finally {
+    await store?.close();
+  }
+  return 0;
+}
+
+async function cmdReplay(runId: string | undefined, dataRoot: string, json: boolean): Promise<number> {
+  if (runId === undefined) return usage('replay requires a run id');
+  const store = await ViewTraceStore.openQuery(dataRoot);
+  try {
+    const replay = store === null ? null : store.replay(runId);
+    if (replay === null) {
+      process.stderr.write(`${PROGRAM}: unknown run: ${runId}\n`);
+      return 1;
+    }
+    process.stdout.write(JSON.stringify(replay, null, json ? 2 : 2) + '\n');
+  } finally {
+    await store?.close();
+  }
+  return 0;
+}
+
+async function cmdOpenLatest(dataRoot: string): Promise<number> {
+  const store = await ViewTraceStore.openQuery(dataRoot);
+  try {
+    const runs = store === null ? [] : store.listRuns();
+    if (runs.length === 0) {
+      process.stdout.write('no runs recorded yet — nothing to open\n');
+      return 1;
+    }
+    let latest = runs[0] as (typeof runs)[number];
+    for (const run of runs) {
+      if (run.updatedAt > latest.updatedAt || (run.updatedAt === latest.updatedAt && run.runId > latest.runId)) {
+        latest = run;
+      }
+    }
+    process.stdout.write(`latest run: ${latest.runId} (${latest.lifecycle} / ${latest.completeness}, ${latest.eventCount} events)\n`);
+    process.stdout.write(`stored at:  ${dataRoot} (runs/${latest.runId}/trace.jsonl)\n`);
+    process.stdout.write(
+      'local report server: not implemented yet (planned for M2) — no URL is opened.\n',
+    );
+    return 3;
+  } finally {
+    await store?.close();
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* main                                                                */
+/* ------------------------------------------------------------------ */
 
 async function main(argv: readonly string[]): Promise<number> {
   const first = argv[0];
@@ -153,15 +449,51 @@ async function main(argv: readonly string[]): Promise<number> {
 
   const command = first as string;
   const rest = argv.slice(1);
-  const notImplemented = NOT_IMPLEMENTED[command];
-  if (notImplemented !== undefined) {
-    process.stderr.write(
-      `${PROGRAM}: '${command}' is not implemented yet (${notImplemented}). See '${PROGRAM} --help'.\n`,
-    );
-    return 3;
-  }
 
   switch (command) {
+    case 'up': {
+      const args = parseArgs(rest);
+      return cmdUp(dataRootOf(args.flags), args.flags.get('json') === true);
+    }
+    case 'status': {
+      const args = parseArgs(rest);
+      return cmdStatus(dataRootOf(args.flags), args.flags.get('json') === true);
+    }
+    case 'down': {
+      const args = parseArgs(rest);
+      return cmdDown(dataRootOf(args.flags));
+    }
+    case 'run': {
+      const separator = rest.indexOf('--');
+      const flagPart = separator === -1 ? rest : rest.slice(0, separator);
+      const producerArgv = separator === -1 ? [] : rest.slice(separator + 1);
+      const args = parseArgs(flagPart);
+      if (producerArgv.length === 0) {
+        return usage('run requires a producer: viewtrace run [--options] -- <command> [args...]');
+      }
+      const adapterId = typeof args.flags.get('adapter') === 'string' ? (args.flags.get('adapter') as string) : REFERENCE_ADAPTER_ID;
+      const adapter = getAdapter(adapterId);
+      if (adapter === null || adapter.status !== 'REFERENCE') {
+        process.stderr.write(
+          `${PROGRAM}: unsupported adapter '${adapterId}'. Supported live adapters: ${REFERENCE_ADAPTER_ID}. ` +
+            'Real agent research adapters land in M5 (see `viewtrace adapters`).\n',
+        );
+        return 2;
+      }
+      return runCommand(producerArgv, {
+        dataRoot: dataRootOf(args.flags),
+        adapter,
+        json: args.flags.get('json') === true,
+        latencyLogPath:
+          typeof args.flags.get('latency-log') === 'string' ? (args.flags.get('latency-log') as string) : undefined,
+      });
+    }
+    case 'open': {
+      const args = parseArgs(rest);
+      const target = args.positional[0] ?? 'latest';
+      if (target !== 'latest') return usage("only 'open latest' exists in M1 (report server is M2 scope)");
+      return cmdOpenLatest(dataRootOf(args.flags));
+    }
     case 'adapters': {
       const args = parseArgs(rest);
       const adapters = listAdapters();
@@ -179,7 +511,6 @@ async function main(argv: readonly string[]): Promise<number> {
       }
       return 0;
     }
-
     case 'ingest': {
       const args = parseArgs(rest);
       const input = args.positional[0];
@@ -209,46 +540,14 @@ async function main(argv: readonly string[]): Promise<number> {
         return 1;
       }
     }
-
     case 'runs': {
       const args = parseArgs(rest);
-      const store = await ViewTraceStore.open({ dataRoot: dataRootOf(args.flags) });
-      try {
-        const runs = store.listRuns();
-        if (args.flags.get('json') === true) {
-          process.stdout.write(JSON.stringify(runs, null, 2) + '\n');
-        } else {
-          if (runs.length === 0) process.stdout.write('no stored runs\n');
-          for (const run of runs) {
-            process.stdout.write(
-              `${run.runId}  ${run.lifecycle}  completeness=${run.completeness}  events=${run.eventCount}  adapter=${run.adapterId}@${run.adapterVersion}\n`,
-            );
-          }
-        }
-      } finally {
-        await store.close();
-      }
-      return 0;
+      return cmdRuns(dataRootOf(args.flags), args.flags.get('json') === true);
     }
-
     case 'replay': {
       const args = parseArgs(rest);
-      const runId = args.positional[0];
-      if (runId === undefined) return usage('replay requires a run id');
-      const store = await ViewTraceStore.open({ dataRoot: dataRootOf(args.flags) });
-      try {
-        const replay = store.replay(runId);
-        if (replay === null) {
-          process.stderr.write(`${PROGRAM}: unknown run: ${runId}\n`);
-          return 1;
-        }
-        process.stdout.write(JSON.stringify(replay, null, 2) + '\n');
-      } finally {
-        await store.close();
-      }
-      return 0;
+      return cmdReplay(args.positional[0], dataRootOf(args.flags), args.flags.get('json') === true);
     }
-
     default:
       return usage(`unknown command '${command}'`);
   }
@@ -287,12 +586,15 @@ function summarizeEvents(events: Readonly<Record<string, string>>): string {
     .join(',');
 }
 
+// process.exit() is deliberately avoided here: it can truncate large
+// stdout writes (replay/runs --json) that are still flushing to a pipe.
+// Setting exitCode lets the event loop drain pending writes before exit.
 main(process.argv.slice(2)).then(
   (code) => {
-    process.exit(code);
+    process.exitCode = code;
   },
   (e) => {
     process.stderr.write(`${PROGRAM}: unexpected failure: ${e instanceof Error ? e.message : String(e)}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   },
 );

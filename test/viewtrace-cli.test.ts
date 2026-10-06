@@ -32,9 +32,8 @@ describe('viewtrace CLI: help and version', () => {
     assert.ok(stdout.includes('~/.viewtrace'));
     assert.ok(stdout.includes('ZERO external network requests'));
     assert.ok(stdout.includes('Private reasoning'), 'privacy statement about reasoning');
-    assert.ok(stdout.includes('not implemented yet'), 'future commands are explicitly marked');
-    for (const cmd of ['up', 'down', 'status', 'run', 'open']) {
-      assert.ok(stdout.includes(`viewtrace ${cmd}`), `help lists ${cmd} as unimplemented`);
+    for (const cmd of ['up', 'down', 'status', 'run', 'open', 'ingest', 'runs', 'replay', 'adapters']) {
+      assert.ok(stdout.includes(`viewtrace ${cmd}`), `help lists ${cmd}`);
     }
     assert.ok(stdout.includes('agent-pigeon'), 'legacy bin compatibility is documented');
   });
@@ -49,15 +48,21 @@ describe('viewtrace CLI: help and version', () => {
   it('rejects usage errors with nonzero exit codes', async () => {
     assert.equal((await runCli([])).code, 2);
     assert.equal((await runCli(['definitely-not-a-command'])).code, 2);
+    assert.equal((await runCli(['run'])).code, 2, 'run without a producer is a usage error');
+    assert.equal((await runCli(['ingest'])).code, 2);
   });
 
-  it('reports unimplemented lifecycle commands explicitly (exit 3)', async () => {
-    for (const cmd of ['up', 'down', 'status', 'run', 'open']) {
-      const { stderr, code } = await runCli([cmd]);
-      assert.equal(code, 3, cmd);
-      assert.ok(stderr.includes('not implemented yet'), cmd);
-      assert.ok(!stderr.includes('started'), `${cmd} must not pretend to run`);
-    }
+  it('keeps `open` explicitly unimplemented until M2 (exit 3)', async () => {
+    // M0 asserted exit 3 for up/down/status/run/open. Since M1 the lifecycle
+    // commands are implemented; only the report-server command stays exit 3.
+    // (Stronger lifecycle behaviour is covered by the M1 test files.)
+    const root = await mkdtemp(join(tmpdir(), 'vt-open3-'));
+    await runCli(['ingest', viewtraceFixture('research-normal.jsonl'), '--data-root', root]);
+    const { stdout, code } = await runCli(['open', 'latest', '--data-root', root]);
+    assert.equal(code, 3);
+    assert.ok(stdout.includes('research-normal-001'));
+    assert.ok(stdout.includes('M2'));
+    assert.ok((await runCli(['--help'])).stdout.includes('not implemented yet'));
   });
 });
 

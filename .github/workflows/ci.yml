@@ -23,7 +23,7 @@ jobs:
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
-      - name: tarball smoke (viewtrace)
+      - name: tarball smoke (viewtrace, M1 lifecycle)
         shell: bash
         run: |
           set -euo pipefail
@@ -32,10 +32,30 @@ jobs:
           SMOKE="$(mktemp -d)"
           npm install --ignore-scripts "$PKG" --prefix "$SMOKE"
           BIN="$SMOKE/node_modules/.bin/viewtrace"
+          DATA="$SMOKE/data-root"
           "$BIN" --version
           "$BIN" --help | grep -q "ViewTrace AI"
-          DATA="$SMOKE/data-root"
-          "$BIN" ingest fixtures/viewtrace/research-normal.jsonl --data-root "$DATA" --json | grep -q '"verified": true'
+          # M1 lifecycle: up → ready → reference run → down → preserved.
+          "$BIN" up --data-root "$DATA" --json | grep -q '"running":true'
+          "$BIN" status --data-root "$DATA" --json | grep -q '"running":true'
+          cat > "$SMOKE/producer.mjs" <<'EOF'
+          const runId = process.env.VIEWTRACE_RUN_ID;
+          const rec = (o) => process.stdout.write(JSON.stringify(o) + "\n");
+          const base = { schemaVersion: 1, runId, occurredAt: new Date().toISOString(),
+            adapterId: "viewtrace-reference-jsonl", adapterVersion: "1.1.0" };
+          rec({ ...base, recordKind: "run", lifecycle: "RUNNING" });
+          rec({ ...base, recordKind: "event", eventId: "e1", type: "SEARCH",
+            origin: { producer: "smoke" }, source: { sourceId: "s1", kind: "TOOL_RESULT", location: "tool://smoke/1" },
+            provenance: { category: "VIEWTRACE_OBSERVED", observed: { toolCallId: "c1" } },
+            payload: { type: "SEARCH", query: "smoke", results: [] } });
+          rec({ ...base, recordKind: "run", lifecycle: "COMPLETED" });
+          EOF
+          "$BIN" run --data-root "$DATA" --json -- node "$SMOKE/producer.mjs" | grep -q '"eventsAccepted":1'
+          RUNID="$(node -e 'const d=JSON.parse(require("fs").readFileSync(0,"utf8"));const r=d.find(x=>x.runId&&x.runId.startsWith("run-"));console.log(r?r.runId:"")' < <("$BIN" runs --data-root "$DATA" --json))"
+          test -n "$RUNID"
+          "$BIN" replay "$RUNID" --data-root "$DATA" --json | grep -q 'e1'
+          "$BIN" down --data-root "$DATA" | grep -q 'stopped'
+          if "$BIN" status --data-root "$DATA" >/dev/null 2>&1; then echo "status must fail after down"; exit 1; fi
+          # Batch ingest still works next to the live store (same data root).
+          "$BIN" ingest fixtures/viewtrace/research-normal.jsonl --data-root "$DATA" --json | grep -q '"verified":true'
           "$BIN" runs --data-root "$DATA" --json | grep -q 'research-normal-001'
-          "$BIN" replay research-normal-001 --data-root "$DATA" --json | grep -q 'evt-recommend-001'
-          "$BIN" up && exit 1 || true

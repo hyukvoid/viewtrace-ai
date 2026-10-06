@@ -167,6 +167,20 @@ function stripPrivateFields(
   return out;
 }
 
+/**
+ * Pre-storage sanitization used by the live wrapper before bytes ever reach
+ * a spool file: the same structural field list the validator enforces, so
+ * declared private-reasoning payloads never land anywhere on disk.
+ */
+export function stripPrivateReasoningFields(value: unknown): {
+  value: unknown;
+  removed: readonly string[];
+} {
+  const removed: string[] = [];
+  const cleaned = stripPrivateFields(value, '', removed);
+  return { value: cleaned, removed };
+}
+
 function requireString(
   obj: Record<string, unknown>,
   key: string,

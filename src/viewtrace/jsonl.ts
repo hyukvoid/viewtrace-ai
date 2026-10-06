@@ -48,14 +48,53 @@ export class JsonlChunkParser {
   private bufferStartOffset = 0;
   private offset = 0;
   private lineIndex = 1;
-  private readonly lines: ParsedLine[] = [];
-  private readonly losses: MutableLoss[] = [];
-  private readonly blankLines: number[] = [];
+  private lines: ParsedLine[] = [];
+  private losses: MutableLoss[] = [];
+  private blankLines: number[] = [];
   private discardMode = false;
   private oversizedLossIndex = -1;
   private bomPending: number[] | null = [];
 
   constructor(private readonly maxLineBytes: number = MAX_LINE_BYTES) {}
+
+  /**
+   * Byte offset of the last complete line boundary (start of the currently
+   * buffered, not-yet-terminated line). Persisting THIS offset (not the raw
+   * read offset) lets a live collector restart safely in the middle of a
+   * split line: only the small partial tail is re-read after a reboot.
+   */
+  get consumedOffset(): number {
+    return this.bufferStartOffset;
+  }
+
+  /** Bytes of the current, not-yet-terminated line held in memory. */
+  get bufferedBytes(): number {
+    return this.buffer.length;
+  }
+
+  /** True while an oversized line is being discarded (up to its newline). */
+  get discarding(): boolean {
+    return this.discardMode;
+  }
+
+  /**
+   * Incremental consumption for live tailing: returns everything parsed
+   * since the last take() and clears the accumulator so memory stays
+   * bounded no matter how long the stream runs.
+   */
+  take(): JsonlParseResult {
+    const out: JsonlParseResult = {
+      lines: this.lines,
+      losses: this.losses,
+      blankLines: this.blankLines,
+      totalBytes: this.offset,
+      endedWithNewline: this.buffer.length === 0 && !this.discardMode,
+    };
+    this.lines = [];
+    this.losses = [];
+    this.blankLines = [];
+    return out;
+  }
 
   push(chunk: Uint8Array): void {
     for (let i = 0; i < chunk.length; i++) {

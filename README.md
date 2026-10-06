@@ -1,24 +1,29 @@
 # Agent Pigeon
 
 > **ViewTrace AI is under construction on top of this repository.** The new
-> `viewtrace` bin (M0 foundation, see `docs/MILESTONES.md`) traces the
+> `viewtrace` bin (M1 — live CLI trace, see `docs/MILESTONES.md`) traces the
 > evidence behind AI answers for research/comparison/recommendation runs.
-> Status is honest and early: batch ingest of the reference JSONL format,
-> local SQLite storage and deterministic replay are implemented and tested;
-> live collection lands in M1, the local report server in M2. Real agent
+> Status is honest and early: batch ingest **and live collection** of the
+> reference JSONL format are implemented and tested — `viewtrace up` starts
+> the local collector, `viewtrace run -- <producer>` wraps a reference
+> producer and shows activity live, `status`/`runs`/`replay` report the
+> honest state. The local report server (`open`) lands in M2; real agent
 > adapters are **not** supported yet (`viewtrace adapters` shows the honest
 > capability matrix). Requires Node >= 22.13 (built-in `node:sqlite`).
 >
 > - **Local-only.** Everything ViewTrace records lives under one data root
 >   (default `~/.viewtrace`); the runtime makes zero external network
->   requests — no cloud, accounts, telemetry or API keys.
+>   requests — no cloud, accounts, telemetry or API keys. The collector's
+>   control channel binds `127.0.0.1` only and requires a per-process token.
 > - **Original agent history files are read-only inputs** and are never
 >   modified. ViewTrace's own recordings are local writes under the data
->   root (SQLite `viewtrace.db` + per-run `trace.jsonl`, mode 0700/0600 on
->   POSIX). Delete the data root to erase everything ViewTrace recorded.
+>   root (SQLite `viewtrace.db`, per-run `trace.jsonl` and a sanitized live
+>   spool, mode 0700/0600 on POSIX). Delete the data root to erase
+>   everything ViewTrace recorded.
 > - **Private reasoning is never collected.** Declared thinking/analysis
->   payloads are stripped before storage; provenance labels (agent-reported /
->   observed / inferred) are preserved exactly as claimed, never promoted.
+>   payloads are stripped before anything touches disk; provenance labels
+>   (agent-reported / observed / inferred) are preserved exactly as claimed,
+>   never promoted.
 > - The legacy `agent-pigeon` flight recorder below is unchanged.
 
 **A flight recorder for coding agents.**

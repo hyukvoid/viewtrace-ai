@@ -41,15 +41,15 @@ export const ADAPTER_CAPABILITIES: readonly AdapterCapability[] = [
   {
     adapterId: REFERENCE_ADAPTER_ID,
     label: 'ViewTrace reference JSONL',
-    version: '1.0.0',
+    version: '1.1.0',
     status: 'REFERENCE',
     events: ALL_YES,
     sourceAnchor: 'YES',
     provenance: 'YES',
-    liveIngest: 'NO',
+    liveIngest: 'YES',
     completion: 'YES',
     limitations: [
-      'Batch file ingest only; live collection lands in M1',
+      'Live collection via `viewtrace run -- <producer>` (M1); report server is M2 scope',
       'Reference format for contract verification, not a real agent adapter',
       'Provenance labels are preserved as claimed; ViewTrace never verifies or promotes them',
     ],

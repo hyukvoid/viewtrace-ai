@@ -56,6 +56,8 @@ export interface StoreOptions {
   readonly now?: () => string;
   /** Test-only fault injection at commit boundaries. */
   readonly injectFault?: (point: FaultPoint) => Error | undefined;
+  /** Read-only query connection: no recovery, no migration, no writes. */
+  readonly readonly?: boolean;
 }
 
 export interface AppendResult {
@@ -90,7 +92,8 @@ export class StoreError extends Error {
       | 'DB_ERROR'
       | 'DB_BUSY'
       | 'DB_READ_ONLY'
-      | 'STORE_CLOSED',
+      | 'STORE_CLOSED'
+      | 'STORE_READ_ONLY',
     message: string,
     cause?: unknown,
   ) {
@@ -219,7 +222,53 @@ export class ViewTraceStore {
   }
 
   static async open(options: StoreOptions): Promise<ViewTraceStore> {
+    const store = await ViewTraceStore.openInternal(options);
+    return store as ViewTraceStore;
+  }
+
+  /**
+   * Read-only query connection (CLI `runs`/`replay`/`open` while the
+   * collector service owns writes). Readers never run recovery and never
+   * create the data root. Returns null when no store exists yet.
+   */
+  static async openQuery(dataRoot: string): Promise<ViewTraceStore | null> {
+    return ViewTraceStore.openInternal({ dataRoot, readonly: true });
+  }
+
+  private static async openInternal(options: StoreOptions): Promise<ViewTraceStore | null> {
     const store = new ViewTraceStore(options.dataRoot, options);
+    const dbPath = join(options.dataRoot, 'viewtrace.db');
+
+    if (options.readonly === true) {
+      if (!existsSync(dbPath)) return null;
+      const db = openDatabase(dbPath, true);
+      try {
+        db.exec('PRAGMA busy_timeout = 2500');
+        const version = readVersion(db);
+        if (version > DB_SCHEMA_VERSION) {
+          throw new StoreError(
+            'FUTURE_DB_VERSION',
+            `database schema version ${version} is newer than supported ${DB_SCHEMA_VERSION}; refusing to open`,
+          );
+        }
+        if (version < DB_SCHEMA_VERSION) {
+          throw new StoreError(
+            'MIGRATION_FAILED',
+            `store schema v${version} requires migration; open it read-write once (viewtrace ingest or the collector service)`,
+          );
+        }
+      } catch (e) {
+        try {
+          db.close();
+        } catch {
+          /* already closing */
+        }
+        throw e;
+      }
+      store.db = db;
+      return store;
+    }
+
     await mkdir(options.dataRoot, { recursive: true, mode: 0o700 });
     await chmodIfPosix(options.dataRoot, 0o700);
     for (const dir of ['runs', 'evidence', 'artifacts']) {
@@ -227,9 +276,8 @@ export class ViewTraceStore {
       await mkdir(p, { recursive: true, mode: 0o700 });
       await chmodIfPosix(p, 0o700);
     }
-    const dbPath = join(options.dataRoot, 'viewtrace.db');
     const existed = existsSync(dbPath);
-    const db = openDatabase(dbPath);
+    const db = openDatabase(dbPath, false);
     try {
       db.exec('PRAGMA busy_timeout = 2500');
       db.exec('PRAGMA synchronous = FULL');
@@ -282,6 +330,12 @@ export class ViewTraceStore {
     return this.db;
   }
 
+  private assertWritable(): void {
+    if (this.options.readonly === true) {
+      throw new StoreError('STORE_READ_ONLY', 'store is open read-only; writes require the collector service');
+    }
+  }
+
   private runDir(runId: string): string {
     if (!isValidRunId(runId)) {
       throw new StoreError('INVALID_RUN_ID', 'run id is not filesystem-safe');
@@ -301,6 +355,7 @@ export class ViewTraceStore {
     runId: string,
     info: { adapterId: string; adapterVersion: string },
   ): Promise<RunState> {
+    this.assertWritable();
     const db = this.requireDb();
     this.runDir(runId); // validate before any path use
     const now = this.now();
@@ -336,6 +391,7 @@ export class ViewTraceStore {
 
   /** Explicit completeness judgement; losses are never hidden upstream. */
   async setCompleteness(runId: string, completeness: CollectionCompleteness): Promise<RunState> {
+    this.assertWritable();
     const db = this.requireDb();
     try {
       const changes = db
@@ -367,6 +423,7 @@ export class ViewTraceStore {
     diagnostics: readonly Diagnostic[] = [],
     byteCursor = 0,
   ): Promise<AppendResult> {
+    this.assertWritable();
     const db = this.requireDb();
     for (const record of records) {
       if (record.runId !== runId) {
@@ -770,9 +827,9 @@ function insertDiagnostic(db: DatabaseSync, runId: string, seq: number, d: Diagn
   ).run(runId, seq, d.code, d.severity, d.message, d.lineIndex ?? null, d.byteOffset ?? null, d.eventId ?? null);
 }
 
-function openDatabase(dbPath: string): DatabaseSync {
+function openDatabase(dbPath: string, readOnly: boolean): DatabaseSync {
   try {
-    return new DatabaseSync(dbPath);
+    return new DatabaseSync(dbPath, { readOnly });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     if (/readonly|SQLITE_READONLY/i.test(message)) {

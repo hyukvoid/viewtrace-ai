@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # engines floor (22.13 = first unflagged node:sqlite) and current LTS
+        node: ['22.13.0', '22', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm test
+      - name: tarball smoke (viewtrace)
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --pack-destination .
+          PKG="$(ls agent-pigeon-*.tgz | head -1)"
+          SMOKE="$(mktemp -d)"
+          npm install --ignore-scripts "$PKG" --prefix "$SMOKE"
+          BIN="$SMOKE/node_modules/.bin/viewtrace"
+          "$BIN" --version
+          "$BIN" --help | grep -q "ViewTrace AI"
+          DATA="$SMOKE/data-root"
+          "$BIN" ingest fixtures/viewtrace/research-normal.jsonl --data-root "$DATA" --json | grep -q '"verified": true'
+          "$BIN" runs --data-root "$DATA" --json | grep -q 'research-normal-001'
+          "$BIN" replay research-normal-001 --data-root "$DATA" --json | grep -q 'evt-recommend-001'
+          "$BIN" up && exit 1 || true

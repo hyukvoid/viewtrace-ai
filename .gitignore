@@ -12,3 +12,7 @@ dist/
 .DS_Store
 *.log
 *.tgz
+
+# local milestone plans & verification records — never commit
+/docs/MILESTONES.md
+/docs/milestones/**/*.md

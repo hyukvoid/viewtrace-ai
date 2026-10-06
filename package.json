@@ -1,7 +1,7 @@
 {
   "name": "agent-pigeon",
   "version": "0.3.0",
-  "description": "Flight recorder for coding agents. See what your agents changed, where they failed, how they recovered, and which one needs attention right now — across Codex, Claude Code, ZCode and Pigeon JSONL. Local, read-only CLI + standalone web UI.",
+  "description": "Flight recorder for coding agents (agent-pigeon) + ViewTrace AI foundation: trace the evidence behind AI answers — searchable, verifiable provenance for research/comparison/recommendation runs, stored locally in SQLite. Local-only; zero network; private reasoning never collected.",
   "keywords": [
     "coding-agent",
     "claude-code",
@@ -9,6 +9,8 @@
     "zcode",
     "opencode",
     "flight-recorder",
+    "viewtrace",
+    "evidence-trace",
     "cli",
     "session",
     "replay",
@@ -17,7 +19,7 @@
   "license": "MIT",
   "type": "module",
   "engines": {
-    "node": ">=20.11"
+    "node": ">=22.13.0"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -37,7 +39,8 @@
     "typescript": "5.9.3"
   },
   "bin": {
-    "agent-pigeon": "dist/src/cli.js"
+    "agent-pigeon": "dist/src/cli.js",
+    "viewtrace": "dist/src/viewtrace/cli.js"
   },
   "files": [
     "dist/src/cli.js",
@@ -45,6 +48,7 @@
     "dist/src/compare.js",
     "dist/src/share.js",
     "dist/src/session.js",
+    "dist/src/viewtrace",
     "dist/src/core",
     "dist/src/replay",
     "dist/src/pigeon",

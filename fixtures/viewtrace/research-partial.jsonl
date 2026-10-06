@@ -1,0 +1,4 @@
+{"recordKind":"run","schemaVersion":1,"runId":"research-partial-001","lifecycle":"RUNNING","occurredAt":"2026-10-05T10:00:00+09:00","adapterId":"viewtrace-reference-jsonl","adapterVersion":"1.0.0"}
+{"recordKind":"event","schemaVersion":1,"eventId":"evt-search-001","runId":"research-partial-001","type":"SEARCH","occurredAt":"2026-10-05T10:00:05+09:00","adapterId":"viewtrace-reference-jsonl","adapterVersion":"1.0.0","origin":{"producer":"viewtrace-reference-jsonl"},"source":{"sourceId":"search-1","kind":"TOOL_RESULT","location":"tool://web-search/call-1"},"provenance":{"category":"VIEWTRACE_OBSERVED","observed":{"toolCallId":"call-1"}},"payload":{"type":"SEARCH","query":"부분 입력 스트림 테스트","results":[]}}
+{"recordKind":"event","schemaVersion":1,"eventId":"evt-broken-middle", 이 줄은 확정적으로 깨진 JSON이다
+{"recordKind":"run","schemaVersion":1,"runId":"research-partial-001","lifecycle":"COMP

@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# ViewTrace fixtures encode exact bytes (CRLF, truncated tails, byte offsets)
+fixtures/viewtrace/** -text

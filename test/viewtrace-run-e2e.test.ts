@@ -264,14 +264,21 @@ await new Promise(() => undefined);
       assert.equal(last?.lifecycle, 'CANCELLED');
       assert.equal(last?.eventCount, 1, 'the pre-cancel event is committed');
     } else {
-      // Windows cannot deliver catchable SIGINT from another process; the
-      // honest equivalent is observing an externally killed producer.
+      // Windows cannot deliver a catchable SIGINT to another process —
+      // child.kill() hard-terminates the WRAPPER, which is exactly the
+      // missing-termination scenario: the honest expectation is a nonzero
+      // exit and a run that is never marked COMPLETED.
       const spawned = spawnBin([...spawnArgs], { env: { VIEWTRACE_DRAIN_TIMEOUT_MS: '20000' } });
       await waitFor(() => spawned.stdoutSoFar().includes('SEARCH'), 20_000, 100);
-      spawned.child.kill(); // hard termination of the wrapper's child on win32
+      const runIdMatch = /run (run-[a-z0-9-]+) started/.exec(spawned.stdoutSoFar())?.[1];
+      spawned.child.kill(); // uncatchable termination on win32
       const result = await spawned.done;
       assert.notEqual(result.code, 0);
-      assert.ok(result.stdout.includes('FAILED') || result.stdout.includes('CANCELLED'), result.stdout);
+      assert.ok(runIdMatch !== undefined);
+      await sleep(1200);
+      const run = await latestRun(root, (r) => r.runId === runIdMatch);
+      assert.notEqual(run?.lifecycle, 'COMPLETED', 'an externally killed wrapper must never read as success');
+      assert.notEqual(run?.completeness, 'COMPLETE');
     }
   });
 

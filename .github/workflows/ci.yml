@@ -57,5 +57,5 @@ jobs:
           "$BIN" down --data-root "$DATA" | grep -q 'stopped'
           if "$BIN" status --data-root "$DATA" >/dev/null 2>&1; then echo "status must fail after down"; exit 1; fi
           # Batch ingest still works next to the live store (same data root).
-          "$BIN" ingest fixtures/viewtrace/research-normal.jsonl --data-root "$DATA" --json | grep -q '"verified":true'
+          "$BIN" ingest fixtures/viewtrace/research-normal.jsonl --data-root "$DATA" --json | grep -q '"verified": true'
           "$BIN" runs --data-root "$DATA" --json | grep -q 'research-normal-001'

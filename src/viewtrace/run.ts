@@ -85,17 +85,17 @@ function generateRunId(): string {
 /**
  * Windows .cmd/.bat producers need cmd.exe; everything else is spawned
  * directly with an argument array — there is never a shell on the path, so
- * producer arguments cannot be interpolated.
+ * producer arguments cannot be interpolated. For .cmd, each argument is
+ * passed as its own argv entry and Node applies its standard Windows
+ * quoting; metacharacter interpretation inside the .cmd script itself is
+ * the script's own semantics (documented residual risk of cmd formats).
  */
 function buildSpawn(
   command: string,
   args: readonly string[],
 ): { file: string; args: string[] } {
   if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
-    const commandLine = [command, ...args]
-      .map((a) => `"${a.replace(/"/g, '""')}"`)
-      .join(' ');
-    return { file: process.env['ComSpec'] ?? 'cmd.exe', args: ['/d', '/s', '/c', commandLine] };
+    return { file: process.env['ComSpec'] ?? 'cmd.exe', args: ['/d', '/s', '/c', command, ...args] };
   }
   return { file: command, args: [...args] };
 }

@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { promisify } from 'node:util';
 
@@ -12,7 +13,11 @@ import { cliDist, viewtraceFixture, repoRoot } from './helpers/viewtrace.js';
 
 const exec = promisify(execFile);
 
-const sentinelPreload = join(repoRoot, 'test', 'helpers', 'net-sentinel.mjs');
+// --import resolves its argument as a URL; a bare Windows path is rejected
+// with ERR_UNSUPPORTED_ESM_URL_SCHEME, so always pass a file:// URL.
+const sentinelPreload = pathToFileURL(
+  join(repoRoot, 'test', 'helpers', 'net-sentinel.mjs'),
+).href;
 
 interface SentinelReport {
   violations: { kind: string; target: string }[];

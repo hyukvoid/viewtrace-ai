@@ -13,14 +13,25 @@
 import { DISPLAY_NAMES } from './types.js';
 import type { Diagnostic, LossRecord, RunLifecycle, ViewTraceEvent } from './types.js';
 
-const ANSI_PATTERN = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)/g;
-const CONTROL_PATTERN = /[\x00-\x08\x0b-\x1f\x7f]/g;
+const ANSI_PATTERN = /(?:\x1b\[|\u009b)[0-9;?]*[ -/]*[@-~]|(?:\x1b\]|\u009d)[^\x07\x1b\u009c]*(?:\x07|\x1b\\|\u009c)?/g;
+const CONTROL_PATTERN = /[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f]/g;
 
 export function sanitizeForTerminal(input: string, maxLength = 200): string {
-  let text = input.replace(ANSI_PATTERN, ' ').replace(CONTROL_PATTERN, ' ');
+  let text = sanitizeTerminalLine(input);
   text = text.replace(/\s+/g, ' ').trim();
   if (text.length > maxLength) text = `${text.slice(0, maxLength)}…`;
   return text;
+}
+
+/** Keep layout spaces while blocking producer-created lines and controls. */
+export function sanitizeTerminalLine(input: string): string {
+  return input.replace(ANSI_PATTERN, ' ').replace(CONTROL_PATTERN, ' ').replace(/[\r\n\t]/g, ' ');
+}
+
+/** Escape C1 controls in JSON without changing any decoded contract value. */
+export function stringifyForTerminal(value: unknown, space?: number): string {
+  return JSON.stringify(value, null, space).replace(/[\u007f-\u009f]/g, (character) =>
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
 }
 
 function clock(): string {

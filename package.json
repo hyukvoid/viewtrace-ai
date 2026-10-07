@@ -23,8 +23,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "npm run build && node --test \"dist/test/**/*.test.js\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.browser.json",
+    "test": "npm run build && node --test --test-concurrency=1 \"dist/test/**/*.test.js\"",
     "ui": "npm run build && node dist/src/cli.js ui",
     "demo": "npm run build && node dist/src/poc00-demo.js",
     "share": "npm run build && node dist/src/cli.js share",
@@ -34,6 +34,7 @@
     "prepare": "npm run build"
   },
   "devDependencies": {
+    "@axe-core/playwright": "4.11.1",
     "@playwright/test": "1.63.0",
     "@types/node": "24.10.1",
     "agent-device": "^0.21.8",

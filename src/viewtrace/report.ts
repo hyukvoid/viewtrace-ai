@@ -158,12 +158,22 @@ export function eventPage(
   limit: number,
   answerId?: string,
   selectionId?: number,
+  eventId?: string,
 ) {
   const report =
     answerId === undefined ? runReport(store, runId) : answerReport(store, runId, answerId, selectionId);
   if (!report) return null;
   const receipt = answerId === undefined ? undefined : store.getAnswer(runId, answerId);
-  const page = store.pageRecords(runId, after, limit, receipt?.receiptId);
+  // An inspector lookup is constrained to the same explicit answer scope as
+  // pagination. A missing scope never grants access to another turn's events.
+  if (
+    eventId !== undefined && receipt &&
+    ![...(receipt.eventIds ?? []), ...(receipt.sharedEventIds ?? [])].includes(eventId)
+  ) return null;
+  const page = eventId === undefined
+    ? store.pageRecords(runId, after, limit, receipt?.receiptId)
+    : { records: store.getEventsByIds(runId, [eventId]), nextCursor: null };
+  if (eventId !== undefined && page.records.length === 0) return null;
   return {
     events: page.records,
     nextCursor: page.nextCursor,

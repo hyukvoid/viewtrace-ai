@@ -1,0 +1,254 @@
+{
+  "description": "Independent M4 oracle (verification worker). Expected values were derived by hand from docs/MILESTONES.md sections 3, 8 and 9 rules BEFORE any M4 UI implementation was read. IDs follow the M3 analyzer's published derivation: evidence ev-<eventId>, claims claim-<eventId>[-<candidate>-<criterion>|-recommendation], relations rel-*, conflicts conflict-<contradictionEventId>, topology nodes node-activity-*/node-query-*/node-branch-*.",
+  "answers": {
+    "ans-m4-decide": {
+      "runId": "run-m4-decide",
+      "receiptId": "receipt-m4-decide",
+      "scope": { "boundary": "EXACT", "eventCount": 4 },
+      "lens": {
+        "hypothesisMode": "DECIDE",
+        "observedMode": "DECIDE",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "DECIDE"
+      },
+      "support": {
+        "status": "STRONGLY_SUPPORTED",
+        "reasonCodes": ["ALL_CORE_CLAIMS_SUPPORTED"],
+        "unresolvedConflictIds": []
+      },
+      "claims": [
+        {
+          "claimId": "claim-m4d-claim",
+          "importance": "CORE",
+          "support": "STRONGLY_SUPPORTED",
+          "supportingEvidenceIds": ["ev-m4d-read"]
+        },
+        {
+          "claimId": "claim-m4d-recommend-recommendation",
+          "importance": "CORE",
+          "support": "STRONGLY_SUPPORTED",
+          "supportingEvidenceIds": ["ev-m4d-read"]
+        }
+      ],
+      "decideProjection": {
+        "selectedCandidate": "Aerospike",
+        "rejectedOptions": [
+          { "candidate": "RocksDB", "rationaleClaimIds": null, "evidenceIds": null },
+          { "candidate": "TiKV", "rationaleClaimIds": null, "evidenceIds": null }
+        ]
+      },
+      "sourceLedgerCanonicalIds": ["src-m4-web", "src-m4-edge", "src-m4-decide-doc"],
+      "graph": {
+        "observedNodeIdsInclude": ["node-activity-search", "node-activity-read", "node-query-m4d-search"],
+        "inferredNodeIdsInclude": ["node-branch-1-m4d-search"],
+        "relationsInclude": {
+          "rel-claim-m4d-claim-src-m4-edge-cites": "AGENT_REPORTED"
+        }
+      },
+      "forbidden": [
+        "rejected option RocksDB or TiKV gains rationaleClaimIds or evidenceIds",
+        "support is PARTIALLY_SUPPORTED or UNKNOWN",
+        "mode history shows OBSERVED_CORRECTION"
+      ]
+    },
+    "ans-m4-correct": {
+      "runId": "run-m4-correction",
+      "receiptId": "receipt-m4-correct",
+      "scope": { "boundary": "EXACT", "eventCount": 3 },
+      "lens": {
+        "hypothesisMode": "EXPLAIN",
+        "observedMode": "COMPARE",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CORRECTION"],
+        "currentMode": "COMPARE"
+      },
+      "support": {
+        "status": "STRONGLY_SUPPORTED",
+        "reasonCodes": ["ALL_CORE_CLAIMS_SUPPORTED"]
+      },
+      "compareProjection": {
+        "candidates": ["ReplicatedQueue", "LocalQueue"],
+        "criteria": ["Latency"],
+        "cellValues": { "ReplicatedQueue|Latency": "12ms", "LocalQueue|Latency": "1ms" },
+        "cellEvidence": { "ReplicatedQueue|Latency": ["ev-m4c-read-a"], "LocalQueue|Latency": ["ev-m4c-read-b"] }
+      },
+      "overrideIdentity": {
+        "note": "explicit override only appends EXPLICIT_OVERRIDE revision; claim/evidence/support identity unchanged",
+        "evidenceIds": ["ev-m4c-read-a", "ev-m4c-read-b", "ev-m4c-compare"]
+      },
+      "forbidden": [
+        "override changes support or evidence ids",
+        "history hides the EXPLAIN hypothesis"
+      ]
+    },
+    "ans-m4-conflict": {
+      "runId": "run-m4-conflict",
+      "receiptId": "receipt-m4-conflict",
+      "scope": { "boundary": "EXACT", "eventCount": 5 },
+      "lens": {
+        "hypothesisMode": "VERIFY",
+        "observedMode": "VERIFY",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "VERIFY"
+      },
+      "support": {
+        "status": "CONFLICTING_EVIDENCE",
+        "reasonCodes": ["UNRESOLVED_CORE_CONFLICT"],
+        "unresolvedConflictIds": ["conflict-m4f-contra"]
+      },
+      "conflicts": [
+        {
+          "conflictId": "conflict-m4f-contra",
+          "status": "DETECTED",
+          "conditionMatch": "SAME",
+          "resolution": null
+        }
+      ],
+      "verifyProjection": {
+        "verifyEventIds": [],
+        "conflictIds": ["conflict-m4f-contra"]
+      },
+      "unresolvedAreasNonEmpty": true,
+      "forbidden": [
+        "conflict displayed as RESOLVED",
+        "support displayed as STRONGLY_SUPPORTED or PARTIALLY_SUPPORTED",
+        "unresolved area hidden behind collapse"
+      ]
+    },
+    "ans-m4-resolved": {
+      "runId": "run-m4-resolved",
+      "receiptId": "receipt-m4-resolved",
+      "scope": { "boundary": "EXACT", "eventCount": 6 },
+      "lens": {
+        "hypothesisMode": "VERIFY",
+        "observedMode": "VERIFY",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "VERIFY"
+      },
+      "support": {
+        "status": "STRONGLY_SUPPORTED",
+        "reasonCodes": ["ALL_CORE_CLAIMS_SUPPORTED"],
+        "unresolvedConflictIds": []
+      },
+      "conflicts": [
+        {
+          "conflictId": "conflict-m4r-contra",
+          "status": "RESOLVED",
+          "history": ["DETECTED", "RESOLVED"],
+          "resolution": {
+            "verifyEventId": "m4r-verify",
+            "result": "REFUTED",
+            "resolverEvidenceIds": ["ev-m4r-read-lab"]
+          }
+        }
+      ],
+      "verifications": [
+        {
+          "verifyEventId": "m4r-verify",
+          "targetResolution": "MATCHED",
+          "result": "REFUTED",
+          "correctness": "VALID"
+        }
+      ],
+      "unresolvedAreasNonEmpty": false,
+      "forbidden": [
+        "resolution hides the earlier DETECTED history",
+        "unresolved area list still contains conflict-m4r-contra"
+      ]
+    },
+    "ans-m4-jev": {
+      "runId": "run-m4-jev",
+      "receiptId": "receipt-m4-jev",
+      "scope": { "boundary": "EXACT", "eventCount": 7 },
+      "lens": {
+        "hypothesisMode": "IDEATE",
+        "observedMode": "IDEATE",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "IDEATE"
+      },
+      "support": {
+        "status": "UNKNOWN",
+        "reasonCodes": ["TARGET_UNKNOWN"]
+      },
+      "jevCheckpoints": 3,
+      "jevAllSucceeded": true,
+      "jevNeverElevatesSupport": "support stays UNKNOWN even though advisory labels say progress YES",
+      "ideateProjection": {
+        "branches": [
+          { "branchId": "branch-m4j-s1", "status": "UNKNOWN" },
+          { "branchId": "branch-m4j-s2", "status": "UNKNOWN" },
+          { "branchId": "branch-m4j-s3", "status": "UNKNOWN" },
+          { "branchId": "branch-m4j-s4", "status": "ACTIVE" }
+        ],
+        "diversityStatus": "OBSERVED"
+      },
+      "forbidden": [
+        "JEV advisory labels change evidence support",
+        "branches other than the last shown as DROPPED without discard evidence"
+      ]
+    },
+    "ans-m4-jev-rec": {
+      "runId": "run-m4-jev",
+      "receiptId": "receipt-m4-jevrec",
+      "scope": { "boundary": "EXACT", "eventCount": 2 },
+      "lens": {
+        "hypothesisMode": "DECIDE",
+        "observedMode": "DECIDE",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "DECIDE"
+      },
+      "support": {
+        "status": "INSUFFICIENT_EVIDENCE",
+        "reasonCodes": ["NO_ADMISSIBLE_SUPPORT"]
+      },
+      "jevCheckpoints": 1,
+      "jevTrigger": "PRE_RECOMMENDATION",
+      "forbidden": [
+        "recommendation rationale fabricated from the unlinked MVCC read"
+      ]
+    },
+    "ans-m4-assess": {
+      "runId": "run-m4-assess",
+      "receiptId": "receipt-m4-assess",
+      "scope": { "boundary": "EXACT", "eventCount": 2 },
+      "lens": {
+        "hypothesisMode": "ASSESS",
+        "observedMode": "ASSESS",
+        "phases": ["INITIAL_HYPOTHESIS", "OBSERVED_CONFIRMATION"],
+        "currentMode": "ASSESS",
+        "temporal": "FRESHNESS_SENSITIVE"
+      },
+      "assessProjection": {
+        "freshness": "UNKNOWN",
+        "riskClaimIds": ["claim-m4a-claim"]
+      },
+      "support": {
+        "status": "STRONGLY_SUPPORTED",
+        "reasonCodes": ["ALL_CORE_CLAIMS_SUPPORTED"]
+      },
+      "forbidden": [
+        "freshness displayed as CURRENT or STALE although no publication dates were recorded"
+      ]
+    },
+    "ans-m4-xss": {
+      "runId": "run-m4-xss",
+      "receiptId": "receipt-m4-xss",
+      "scope": { "boundary": "EXACT", "eventCount": 4 },
+      "secretValue": "M4_SECRET_9f172a",
+      "privateReasoningValue": "PRIVATE_M4_REASONING_77c3",
+      "forbidden": [
+        "secret value or private reasoning value appears in API JSON, DOM text, raw events or console",
+        "javascript: source location becomes a clickable href",
+        "answer or claim markup is interpreted as HTML",
+        "any automatic non-127.0.0.1 request before the explicit source click"
+      ]
+    }
+  },
+  "liveRun": {
+    "runId": "run-m4-live",
+    "phase1EventCount": 3,
+    "phase2EventCount": 5,
+    "phase2Lifecycle": "COMPLETED",
+    "answerId": "ans-m4-live",
+    "legacyContainer": "receipt has no eventIds; run page is the raw surface"
+  }
+}

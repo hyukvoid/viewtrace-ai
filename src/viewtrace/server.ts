@@ -170,9 +170,10 @@ export async function startReportServer(
       };
       const pageKeys = new Set(['limit', 'cursor', 'offset', 'selection']);
       const isAnalysisPath = /\/analysis$/.test(path);
+      const isEventsPath = /\/events$/.test(path);
       const allowedKeys = isAnalysisPath
         ? new Set(['limit', 'cursor', 'offset', 'selection', 'mode'])
-        : pageKeys;
+        : isEventsPath ? new Set([...pageKeys, 'eventId']) : pageKeys;
       if (path !== '/api/resolve')
         for (const key of url.searchParams.keys())
           if (!allowedKeys.has(key)) {
@@ -294,9 +295,14 @@ export async function startReportServer(
         const selection = url.searchParams.has('selection')
           ? integer(url.searchParams.get('selection'), 0, Number.MAX_SAFE_INTEGER)
           : undefined;
+        const eventId = url.searchParams.get('eventId') ?? undefined;
+        if (eventId !== undefined && !isValidEventId(eventId)) {
+          fail(400, 'INVALID_ID');
+          return;
+        }
         const data =
           action === 'events'
-            ? eventPage(store, runId, after, limit, answerId, selection)
+            ? eventPage(store, runId, after, limit, answerId, selection, eventId)
             : answerId
               ? answerReport(store, runId, answerId, selection)
               : runReport(store, runId);

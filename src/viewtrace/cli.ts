@@ -9,7 +9,10 @@ import { reveal, reportMutation, reportConnection } from './reveal.js';
 import { parseAnswerContext } from './resolver.js';
 import { isValidRunId, isValidTimestamp } from './validate.js';
 import { answerAnalysisReport } from './report.js';
-import { ANALYSIS_MODES, type AnalysisMode, type AnalysisReportV1 } from './analysis-types.js';
+import { ANALYSIS_MODES, type AnalysisMode } from './analysis-types.js';
+import { buildCollectionStatus, renderAnalysisReport } from './presentation/report-view.js';
+import { runMonitor } from './presentation/monitor.js';
+import { sanitizeForTerminal, sanitizeTerminalLine, stringifyForTerminal } from './display.js';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
@@ -89,12 +92,30 @@ Batch/query (M0 commands, unchanged):
   viewtrace replay <runId> [--data-root <dir>] [--json]
   viewtrace adapters [--json]
 
-Analysis (M3, incremental evidence analyzer & JEV v2):
+Analysis (M3 incremental analyzer; M4 answer-first report rendering):
   viewtrace analyze <runId> [--answer <answerId>] [--mode <mode>]
                     [--data-root <dir>] [--json]
-      Analyze observable evidence, mode lens, claims, conflicts, and
-      bounded advisory JEV v2 checkpoints for an answer. Prints concise
-      lanes (obs / rep / inf / ?) and evidence support status.
+      Render the stored/incremental AnalysisReportV1 for one answer:
+      support and reason codes, mode lens with override note, provenance
+      lanes (obs / rep / inf / ?), mode projection (COMPARE matrix,
+      DECIDE why-not, VERIFY ledger, ...), the exploration tree with an
+      honest frontier, activity/source concentration with denominators
+      and units, the Source Ledger, the contradiction/verification rail,
+      advisory JEV v2 checkpoints (failures stay UNKNOWN), and collection
+      status: sequence / accepted / rejected / completeness / replay /
+      latency / storage. --mode changes the lens projection only — it
+      never rewrites evidence, scope or provenance. --json prints the
+      report verbatim.
+  viewtrace monitor <runId> [--answer <answerId>] [--mode <mode>]
+                   [--interval <ms>] [--max-wait <ms>] [--json]
+                   [--data-root <dir>]
+      Optional live screen: poll the same incremental analysis as events
+      arrive and print only what is new — tree growth, branch collapse
+      (repeated event ids hide, counts continue; rail items and dropped/
+      unknown statuses never disappear), frontier moves and status
+      changes. Stops when the run is terminal and stable. Without
+      --answer the latest receipt is monitored and later receipts never
+      switch automatically. Zero ANSI escapes; identical when piped.
 
 Reveal (M2, reference adapter only):
   viewtrace [--receipt <id> | --agent <id> --session <id> --turn <id>]
@@ -152,7 +173,7 @@ function defaultDataRoot(): string {
 }
 
 function usage(error?: string): number {
-  if (error !== undefined) process.stderr.write(`${PROGRAM}: ${error}\n`);
+  if (error !== undefined) process.stderr.write(`${PROGRAM}: ${sanitizeForTerminal(error, Number.MAX_SAFE_INTEGER)}\n`);
   process.stderr.write(`Usage: ${PROGRAM} <command> [options] — try '${PROGRAM} --help'\n`);
   return 2;
 }
@@ -178,6 +199,8 @@ const VALUE_FLAGS = new Set([
   '--select',
   '--before',
   '--mode',
+  '--interval',
+  '--max-wait',
 ]);
 const BOOLEAN_FLAGS = new Set(['--json', '--url-only', '--release']);
 
@@ -683,6 +706,23 @@ async function main(argv: readonly string[]): Promise<number> {
       const mode = typeof args.flags.get('mode') === 'string' ? (args.flags.get('mode') as string) : undefined;
       return cmdAnalyze(runId, answerId, mode, dataRootOf(args.flags), args.flags.get('json') === true);
     }
+    case 'monitor': {
+      const args = parseArgs(rest);
+      const runId = args.positional[0];
+      if (!runId || !isValidRunId(runId)) return usage('monitor requires a valid runId');
+      const answerId = typeof args.flags.get('answer') === 'string' ? (args.flags.get('answer') as string) : undefined;
+      const mode = typeof args.flags.get('mode') === 'string' ? (args.flags.get('mode') as string) : undefined;
+      if (mode !== undefined && !ANALYSIS_MODES.includes(mode as AnalysisMode)) {
+        return usage(`invalid --mode '${mode}'; expected one of ${ANALYSIS_MODES.join(', ')}`);
+      }
+      const interval = Number(args.flags.get('interval') ?? 250);
+      const maxWait = Number(args.flags.get('max-wait') ?? 60_000);
+      if (!Number.isInteger(interval) || interval < 20 || interval > 60_000)
+        return usage('--interval must be an integer between 20 and 60000 (ms)');
+      if (!Number.isInteger(maxWait) || maxWait < 100 || maxWait > 600_000)
+        return usage('--max-wait must be an integer between 100 and 600000 (ms)');
+      return cmdMonitor(runId, answerId, mode, interval, maxWait, dataRootOf(args.flags), args.flags.get('json') === true);
+    }
     default:
       return usage(`unknown command '${command}'`);
   }
@@ -707,7 +747,7 @@ async function cmdAnalyze(
   try {
     const run = store.getRun(runId);
     if (!run) {
-      process.stderr.write(`${PROGRAM}: run '${runId}' not found\n`);
+      process.stderr.write(`${PROGRAM}: run '${sanitizeForTerminal(runId)}' not found\n`);
       return 1;
     }
     let targetAnswerId = answerId;
@@ -722,11 +762,11 @@ async function cmdAnalyze(
         .map((a: { answerId: string }) => a.answerId);
       if (available.length === 0) {
         process.stderr.write(
-          `${PROGRAM}: run '${runId}' has no answer receipts; nothing to analyze (analyze is answer-scoped)\n`,
+          `${PROGRAM}: run '${sanitizeForTerminal(runId)}' has no answer receipts; nothing to analyze (analyze is answer-scoped)\n`,
         );
       } else {
         process.stderr.write(
-          `${PROGRAM}: answer '${targetAnswerId}' not found in run '${runId}' (available: ${available.join(', ')})\n`,
+          `${PROGRAM}: answer '${sanitizeForTerminal(targetAnswerId ?? '')}' not found in run '${sanitizeForTerminal(runId)}' (available: ${available.map((a) => sanitizeForTerminal(a)).join(', ')})\n`,
         );
       }
       return 1;
@@ -735,60 +775,73 @@ async function cmdAnalyze(
       overrideMode: overrideMode as AnalysisMode | undefined,
     });
     if (!report) {
-      process.stderr.write(`${PROGRAM}: analysis failed for answer '${targetAnswerId}' in run '${runId}'\n`);
+      process.stderr.write(`${PROGRAM}: analysis failed for answer '${sanitizeForTerminal(targetAnswerId)}' in run '${sanitizeForTerminal(runId)}'\n`);
       return 1;
     }
     if (json) {
-      process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+      process.stdout.write(stringifyForTerminal(report, 2) + '\n');
       return 0;
     }
-    printAnalysisReport(report);
+    const receipt = store.getAnswer(runId, targetAnswerId);
+    const status = buildCollectionStatus(store, runId, dataRoot, receipt?.receiptId);
+    const lines = renderAnalysisReport({
+      report,
+      run: store.getRun(runId),
+      status,
+      answerText: receipt?.answer ?? null,
+      association:
+        answerId !== undefined
+          ? 'explicit answer identity within this run'
+          : 'latest receipt in run (auto-selected for analysis; not an exact reveal match)',
+    });
+    process.stdout.write(lines.join('\n') + '\n');
     return 0;
   } finally {
     store.close();
   }
 }
 
-function printAnalysisReport(report: AnalysisReportV1): void {
-  process.stdout.write(`Analysis Report [${report.schema}]\n`);
-  process.stdout.write(`  Run: ${report.scope.runId}  Answer: ${report.scope.answerId}\n`);
-  process.stdout.write(`  Scope boundary: ${report.scope.boundary}  Freshness: ${report.freshness.status}\n`);
-  process.stdout.write(`  Input revision: ${report.inputRevision.value.slice(0, 16)}… (${report.inputRevision.recordCount} events)\n`);
-  process.stdout.write(`  Support: ${report.support.status} (${report.support.reasonCodes.join(', ')})\n`);
-  process.stdout.write(`  Mode: ${report.lens.currentMode} [${report.lens.revisions[report.lens.revisions.length - 1]?.phase}]\n`);
-
-  let obs = 0, rep = 0, inf = 0, unk = 0;
-  for (const e of report.evidence) {
-    if (e.effectiveProvenance === 'VIEWTRACE_OBSERVED') obs++;
-    else if (e.effectiveProvenance === 'AGENT_REPORTED') rep++;
-    else if (e.effectiveProvenance === 'VIEWTRACE_INFERRED') inf++;
-    else unk++;
-  }
-  for (const c of report.claims) {
-    if (c.provenance === 'AGENT_REPORTED') rep++;
-    else if (c.provenance === 'VIEWTRACE_OBSERVED') obs++;
-    else if (c.provenance === 'VIEWTRACE_INFERRED') inf++;
-  }
-  unk += report.conflicts.filter((c) => c.status === 'DETECTED').length;
-
-  process.stdout.write(`  Lanes: obs:${obs}  rep:${rep}  inf:${inf}  ?:${unk}\n`);
-  process.stdout.write(`  Claims: ${report.claims.length} (${report.claims.filter((c) => c.importance === 'CORE').length} core)\n`);
-  for (const c of report.claims) {
-    process.stdout.write(`    - [${c.support}] ${c.text.slice(0, 70)}\n`);
-  }
-  if (report.conflicts.length > 0) {
-    process.stdout.write(`  Conflicts: ${report.conflicts.length}\n`);
-    for (const cf of report.conflicts) {
-      process.stdout.write(`    - [${cf.status}] conditionMatch:${cf.conditionMatch}\n`);
-    }
-  }
-  if (report.jevResults.length > 0) {
-    process.stdout.write(`  JEV v2 Advisory Checkpoints: ${report.jevResults.length}\n`);
-    for (const j of report.jevResults) {
-      process.stdout.write(
-        `    - ${j.checkpointId}: gain=${j.labels?.evidenceGain ?? 'N/A'} progress=${j.labels?.progress ?? 'N/A'} rethink=${j.labels?.rethinkNeeded ?? 'N/A'}\n`,
-      );
-    }
+async function cmdMonitor(
+  runId: string,
+  answerId: string | undefined,
+  overrideMode: string | undefined,
+  intervalMs: number,
+  maxWaitMs: number,
+  dataRoot: string,
+  json: boolean,
+): Promise<number> {
+  const store = await ViewTraceStore.open({ dataRoot });
+  let cancelled = false;
+  const onSignal = (): void => {
+    cancelled = true;
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  try {
+    return await runMonitor(
+      store,
+      {
+        runId,
+        answerId,
+        overrideMode: overrideMode as AnalysisMode | undefined,
+        intervalMs,
+        maxWaitMs,
+        json,
+        dataRoot,
+      },
+      {
+        emit: (line) => process.stdout.write(sanitizeTerminalLine(line) + '\n'),
+        emitJson: (value) => process.stdout.write(stringifyForTerminal(value) + '\n'),
+        fail: (message) => process.stderr.write(`${sanitizeForTerminal(message, Number.MAX_SAFE_INTEGER)}\n`),
+        sleep: (ms) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)),
+        now: () => Date.now(),
+        cancelled: () => cancelled,
+      },
+    );
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
+    store.close();
   }
 }
 

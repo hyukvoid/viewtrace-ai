@@ -53,7 +53,10 @@ describe('M2 real Chromium DOM reveal', () => {
         await page.goto(url);
         await expect(page.getByRole('heading', { name: `Answer A${i}`, exact: true })).toBeVisible();
         await expect(page.locator('#status')).toContainText('Collection COMPLETE');
-        await expect(page.locator('#status')).toContainText('Evidence support UNKNOWN');
+        // M4 reveals the M3 assessment: these reported-only fixture claims
+        // have no source content. They must never be presented as supported.
+        await expect(page.locator('#status')).toContainText('Evidence support INSUFFICIENT_EVIDENCE');
+        await expect(page.locator('#status')).not.toContainText('STRONGLY_SUPPORTED');
         await expect(page.getByRole('heading', { name: `CLAIM · e${i}` })).toBeVisible();
         assert.equal(await page.locator('article').count(), 2);
         await page.reload();

@@ -1,14 +1,16 @@
 # Agent Pigeon
 
 > **ViewTrace AI is under construction on top of this repository.** The new
-> `viewtrace` bin (M2 — AnswerReceipt & Local Reveal, see `docs/MILESTONES.md`) traces the
+> `viewtrace` bin traces the
 > evidence behind AI answers for research/comparison/recommendation runs.
 > Status is honest and early: batch ingest **and live collection** of the
 > reference JSONL format are implemented and tested — `viewtrace up` starts
 > the local collector, `viewtrace run -- <producer>` wraps a reference
 > producer and shows activity live, `status`/`runs`/`replay` report the
 > honest state. Final public receipts, safe answer resolution, a recent
-> picker and the loopback report are implemented. Real agent
+> picker and the answer-first loopback report are implemented. The shared
+> evidence analyzer supplies seven mode lenses, claim/evidence relationships,
+> source provenance and unresolved areas for CLI and Web inspection. Real agent
 > adapters are **not** supported yet (`viewtrace adapters` shows the honest
 > capability matrix). Requires Node >= 22.13 (built-in `node:sqlite`).
 >
@@ -28,7 +30,18 @@
 >   never promoted.
 > - The legacy `agent-pigeon` flight recorder below is unchanged.
 
-## ViewTrace: Answer → Reveal
+## ViewTrace: Answer → Curiosity → Reveal
+
+Receive an answer normally. When you want to inspect its basis, run bare
+`viewtrace` with a saved receipt context, or choose the answer explicitly in
+the recent picker. Reading the trace is optional; capture still requires
+`viewtrace run` or an explicitly supported integration.
+
+Asking an AI “why?” produces another answer. ViewTrace opens the **stored
+evidence trail for the selected answer**: recorded claims, source anchors,
+public events and missing evidence. It does not generate another rationale.
+The report follows **Answer → Evidence → Process → Raw**. Association,
+collection completeness, evidence support and unresolved areas remain visible.
 
 The reference adapter is the only supported research/receipt producer. This
 demo reads a synthetic multi-turn fixture, not a real agent history:
@@ -42,6 +55,10 @@ viewtrace --receipt receipt-A1 --url-only
 viewtrace --url-only                     # recent answer/trace picker
 viewtrace --select receipt-A3 --url-only  # records explicit user selection
 viewtrace open latest --url-only         # run exploration; association UNKNOWN
+viewtrace analyze receipt-multi --answer A2
+viewtrace analyze receipt-multi --answer A2 --mode COMPARE
+viewtrace analyze receipt-multi --answer A2 --json
+viewtrace monitor receipt-multi --answer A2  # optional live exploration tree
 viewtrace keep receipt-multi
 viewtrace keep receipt-multi --release
 viewtrace prune --before 2026-10-01T00:00:00Z
@@ -64,12 +81,21 @@ to another answer. A user's selection is displayed as `explicit-selection`;
 a direct saved link is `explicit-link`, with current-answer match UNKNOWN.
 These describe local navigation, not verified factual support.
 
-The minimum report shows the stored answer, receipt, explicit own/shared
-event scope, lifecycle, collection completeness and sanitized diagnostics/raw
-events. Evidence support stays UNKNOWN until M3. Recorded provenance labels
-remain claims; no rationale, evidence, private reasoning or turn identities
-are invented. Polling every 2 seconds keeps the same answer identity,
-marks an unreachable snapshot STALE, retries and deduplicates event pages.
+The report shows the stored answer, receipt, explicit own/shared event scope,
+lifecycle, collection completeness and analyzer support. Choose EXPLAIN,
+COMPARE, DECIDE, ASSESS, VERIFY, IDEATE or UNKNOWN as a lens over the same
+answer and evidence. A lens override changes presentation, never support.
+Follow a claim through its evidence card, recorded source and sanitized event
+inspector, or inspect the exploration graph and source/freshness ledger.
+Missing comparison rationale, unresolved conflicts, unavailable checkpoint
+evaluations and unknown source dates stay explicit. JEV is advisory and does
+not increase factual support. `obs / rep / inf / ?` distinguish provenance and
+missing information; producer provenance labels remain claims.
+
+Polling every 2 seconds keeps the same answer identity, marks an unreachable
+snapshot STALE, retries and deduplicates event pages. Raw events are paginated;
+private reasoning and credentials are excluded. Source URLs are never fetched
+automatically; a safe external source link opens only on an explicit click.
 
 Non-TTY and headless use URL-only/text or `--json` candidates, including an
 explicit `--select` path. Interactive TTY has a numbered picker and Enter to

@@ -43,6 +43,7 @@ import {
   formatRunLine,
   formatWarning,
   runTransitionJson,
+  sanitizeForTerminal,
 } from './display.js';
 import { liveDir, readServiceFile } from './servestate.js';
 import { isTerminal } from './collector.js';
@@ -435,7 +436,7 @@ async function pumpStderr(child: ChildProcess): Promise<void> {
   let carry: Buffer = Buffer.alloc(0);
   const write = (text: string): void => {
     // Sanitized passthrough: the agent's own diagnostics, escape-free.
-    process.stderr.write(`[agent] ${text.replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ' ').replace(/\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?)/g, '').trim()}\n`);
+    process.stderr.write(`[agent] ${sanitizeForTerminal(text, 1000)}\n`);
   };
   for await (const chunkOrString of stderr) {
     const chunk = Buffer.isBuffer(chunkOrString) ? chunkOrString : Buffer.from(String(chunkOrString));

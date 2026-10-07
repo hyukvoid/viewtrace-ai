@@ -1,4 +1,4 @@
-# ViewTrace reference receipt and local reveal (M2)
+# ViewTrace reference receipt and local reveal
 
 Reference JSONL schema 1 adds `recordKind: "answer"`, independently versioned
 by `receiptVersion: 1`. This represents only an explicitly finalized public
@@ -55,6 +55,8 @@ Tokens never appear in URLs, logs, answer content or Raw.
 | `GET /api/runs/:runId/events?limit=50&cursor=0` | Sanitized events in collector sequence |
 | `GET /api/runs/:runId/answers/:answerId` | Saved final receipt and scope, status and revision |
 | `GET /api/runs/:runId/answers/:answerId/events` | Same pagination, explicit answer scope only |
+| `GET /api/runs/:runId/answers/:answerId/events?eventId=:id` | One sanitized inspector event; own/shared scope enforced, missing/out-of-scope 404 |
+| `GET /api/runs/:runId/answers/:answerId/analysis?mode=...` | Authoritative M3 analysis; optional seven-mode lens override, same answer/evidence/support |
 | `GET /api/receipts/:receiptId` | Receipt's bounded answer report |
 | `GET /api/resolve?...` | Shared resolver; agentId/agentSessionId/turnId/receiptId/runId/answerId/answerHash/hashVersion |
 | `GET /api/picker?limit=50&offset=0` | Recent answer/run candidates, honest missing identity and nextOffset |
@@ -76,6 +78,16 @@ diagnostics/status. Poll every 2 seconds using the same answer URL. On changed
 revision, reset event pages; deduplicate by same-run event ID. On transient
 failure keep the snapshot marked STALE and retry that identity; on 404 show
 missing/deleted and a picker link. The UI performs no analysis or source fetch.
+
+The answer-first report presents the stored answer before evidence, process
+and sanitized Raw. The analyzer's support and input/state revisions are shown
+separately from navigation association and transport freshness. Mode changes
+use a transient analyzer projection; they preserve the receipt and evidence.
+Claim/evidence/source buttons open a keyboard-accessible inspector over allowed
+anchors. Graph relations retain their own provenance, including inferred
+dashed edges with a text label. Source date absence remains UNKNOWN. Unresolved
+conditions, references and conflicts remain visible even when process panels
+are collapsed. Checkpoint JEV is advisory, with supportEffect NONE.
 
 Retention is indefinite by default. Explicit delete commits a tombstone and
 removes all receipt/index/selection rows in one transaction before removing

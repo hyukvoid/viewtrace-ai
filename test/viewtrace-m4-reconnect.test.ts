@@ -94,8 +94,18 @@ describe('M4 answer-scoped analysis reconnect and inspector state', () => {
       const reveal = await runBin(['--receipt', 'receipt-A2', '--url-only', '--json', '--data-root', root]);
       assert.equal(reveal.code, 0, reveal.stderr);
       const url = (JSON.parse(reveal.stdout) as { url: string }).url;
+      await page.route('**/api/runs/receipt-multi/answers/A2/analysis*', (route) => route.abort());
       await page.goto(url);
+      // Analysis can be unavailable on the first visit too: fetch the saved
+      // answer as fallback, keep its exact scope, then recover on the same URL.
+      await expect(page.locator('#connection')).toContainText('STALE', { timeout: 8000 });
+      await expect(page.getByRole('heading', { name: 'Answer A2', exact: true })).toBeVisible();
+      await expect(page.locator('#analysis-revision')).toHaveCount(0);
       await expect(page.locator('#raw-events article')).toHaveCount(2);
+      assert.equal(page.url(), url);
+      await page.unroute('**/api/runs/receipt-multi/answers/A2/analysis*');
+      await expect(page.locator('#analysis-revision')).toContainText('2 records', { timeout: 8000 });
+      await expect(page.locator('#connection')).toContainText('Stored snapshot');
       const raw = page.locator('#raw-details-e2');
       assert.equal(await raw.getAttribute('open'), null);
       await raw.locator('summary').click();

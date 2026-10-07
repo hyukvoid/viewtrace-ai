@@ -2130,23 +2130,27 @@ async function refresh(path, force = false) {
     const selParam = new URLSearchParams(location.search).get('selection');
     const selQuery = selParam ? `?selection=${encodeURIComponent(selParam)}` : '';
 
-    /** @type {AnswerDetailData} */
-    let data = await api(path + selQuery);
+    /** @type {AnswerDetailData | null} */
+    let data = null;
 
-    const isAnswer = data.receipt !== undefined && data.receipt !== null;
+    const isAnswer = /^\/api\/runs\/[^/]+\/answers\/[^/]+$/.test(path);
     /** @type {AnalysisReportV1 | null} */
     let analysis = null;
 
-    if (isAnswer && data.receipt) {
+    if (isAnswer) {
       try {
         const modeQuery = currentModeOverride ? `&mode=${encodeURIComponent(currentModeOverride)}` : '';
         const analysisSel = selParam ? `&selection=${encodeURIComponent(selParam)}` : '';
-        const analysisUrl = `/api/runs/${encodeURIComponent(data.run.runId)}/answers/${encodeURIComponent(data.receipt.answerId)}/analysis?${(modeQuery + analysisSel).replace(/^&/, '')}`;
+        const analysisUrl = `${path}/analysis?${(modeQuery + analysisSel).replace(/^&/, '')}`;
         analysis = await api(analysisUrl);
         if (!analysis) throw new Error('Analysis is unavailable for this saved answer.');
 
-        // Re-fetch detail after analysis so revision accurately reflects evidenceSupport persistence
+        // Fetch detail after analysis so revision reflects evidenceSupport
+        // persistence and the snapshot guard sees concurrent collection. The
+        // selected answer path already supplies identity; no earlier detail
+        // read is needed on the successful path.
         data = await api(path + selQuery);
+        if (!data) throw new Error('The stored report is unavailable.');
         // An explicitly empty own list still means an exact empty scope in
         // M3, even though its boundary label is UNKNOWN. Only absent own IDs
         // use the run-scoped unknown analysis contract.
@@ -2160,10 +2164,18 @@ async function refresh(path, force = false) {
         // Keep the stored answer available on the first failed analysis, and
         // the complete prior snapshot on later failures. The outer handler
         // marks it STALE and retries without overwriting that state below.
-        if (!currentDetailRevision) await renderReport(data, path, null);
+        if (!currentDetailRevision) {
+          if (!data) data = await api(path + selQuery);
+          if (!data) throw new Error('The stored report is unavailable.');
+          await renderReport(data, path, null);
+        }
         throw analysisErr;
       }
+    } else {
+      data = await api(path + selQuery);
     }
+
+    if (!data) throw new Error('The stored report is unavailable.');
 
     const currentAnalysisRev = analysis
       ? `${analysis.inputRevision.value}:${analysis.stateRevision}:${analysis.freshness.status}`

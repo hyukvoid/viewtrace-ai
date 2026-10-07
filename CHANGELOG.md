@@ -12,6 +12,9 @@
   tombstone recovery. Evidence analysis and real agent research adapters
   remain M3/M5 work.
 - Mandatory actual HTTP/public-bin/Chromium DOM tests; no runtime dependencies.
+- Coherent collector snapshots and full drain confirmation prevent successful
+  producers from returning exit 4 during finalization on Windows. Partial or
+  unconfirmed collection still returns exit 4.
 
 ## 0.3.0 — problem-first live radar
 

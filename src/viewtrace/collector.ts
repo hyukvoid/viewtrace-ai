@@ -391,8 +391,11 @@ export class LiveCollector {
   async snapshot(): Promise<readonly LiveRunSnapshot[]> {
     const out: LiveRunSnapshot[] = [];
     for (const watch of this.watches.values()) {
-      const state = this.store.getRun(watch.runId);
       const size = (await stat(watch.streamPath).catch(() => null))?.size ?? watch.committedCursor;
+      // Read SQLite and the watch together, after asynchronous I/O. A tick
+      // can finalize during stat; reading SQLite before it mixed the old
+      // UNKNOWN completeness with finalized=true in the control response.
+      const state = this.store.getRun(watch.runId);
       out.push({
         runId: watch.runId,
         lifecycle: state?.lifecycle ?? 'UNKNOWN',

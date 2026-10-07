@@ -485,7 +485,10 @@ async function waitForDrain(dataRoot: string, runId: string): Promise<DrainResul
           const run = body.run;
           if (
             run !== undefined &&
-            (run.finalized || (isTerminal(run.lifecycle) && run.pendingBytes === 0 && run.completeness !== 'UNKNOWN'))
+            run.finalized &&
+            isTerminal(run.lifecycle) &&
+            run.pendingBytes === 0 &&
+            run.completeness !== 'UNKNOWN'
           ) {
             return { run, diagnostics: body.diagnostics ?? [], duplicates: body.duplicates ?? [] };
           }

@@ -52,6 +52,55 @@ async function runState(store: ViewTraceStore, runId = RUN): Promise<RunState | 
   return store.getRun(runId);
 }
 
+describe('LiveCollector: coherent drain snapshots', () => {
+  for (const completeness of ['COMPLETE', 'PARTIAL'] as const) {
+    it(`keeps ${completeness} and finalized consistent across an asynchronous file stat`, async (t) => {
+      const root = await prepareRoot();
+      const { store, collector } = await openCollector(root);
+      let releaseFinalization!: () => void;
+      const gate = new Promise<void>((resolve) => { releaseFinalization = resolve; });
+      let reachedFinalization!: () => void;
+      const reached = new Promise<void>((resolve) => { reachedFinalization = resolve; });
+      const setCompleteness = store.setCompleteness.bind(store);
+      t.mock.method(store, 'setCompleteness', async (...args: Parameters<typeof setCompleteness>) => {
+        reachedFinalization();
+        await gate;
+        return setCompleteness(...args);
+      });
+      let tick: Promise<void> | undefined;
+      try {
+        await writeFile(spoolOf(root),
+          (completeness === 'PARTIAL' ? '{ broken\n' : '') +
+          line(makeRunRecord({ runId: RUN, lifecycle: 'COMPLETED' })),
+        );
+        tick = collector.tick();
+        await reached;
+        assert.equal(store.getRun(RUN)?.completeness, 'UNKNOWN');
+        // snapshot starts while the terminal record is committed but its
+        // completeness is not. Commit finalization while snapshot awaits
+        // the real filesystem stat: the CI race, without timing guesses.
+        const snapshot = collector.snapshot();
+        releaseFinalization();
+        await tick;
+        const [run] = await snapshot;
+        assert.ok(run);
+        assert.equal(run.finalized, true);
+        assert.equal(run.completeness, completeness);
+        assert.equal(run.lifecycle, 'COMPLETED');
+        assert.equal(run.pendingBytes, 0);
+        assert.equal(run.committedCursor, Buffer.byteLength(await readFile(spoolOf(root))));
+        assert.equal(store.listDiagnostics(RUN).filter((d) => d.code.startsWith('LOSS_')).length,
+          completeness === 'PARTIAL' ? 1 : 0);
+      } finally {
+        releaseFinalization();
+        await tick;
+        await store.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 describe('LiveCollector: incremental ingestion', () => {
   let root: string;
   let store: ViewTraceStore;

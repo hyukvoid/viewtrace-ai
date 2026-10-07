@@ -1,13 +1,14 @@
 # Agent Pigeon
 
 > **ViewTrace AI is under construction on top of this repository.** The new
-> `viewtrace` bin (M1 — live CLI trace, see `docs/MILESTONES.md`) traces the
+> `viewtrace` bin (M2 — AnswerReceipt & Local Reveal, see `docs/MILESTONES.md`) traces the
 > evidence behind AI answers for research/comparison/recommendation runs.
 > Status is honest and early: batch ingest **and live collection** of the
 > reference JSONL format are implemented and tested — `viewtrace up` starts
 > the local collector, `viewtrace run -- <producer>` wraps a reference
 > producer and shows activity live, `status`/`runs`/`replay` report the
-> honest state. The local report server (`open`) lands in M2; real agent
+> honest state. Final public receipts, safe answer resolution, a recent
+> picker and the loopback report are implemented. Real agent
 > adapters are **not** supported yet (`viewtrace adapters` shows the honest
 > capability matrix). Requires Node >= 22.13 (built-in `node:sqlite`).
 >
@@ -18,13 +19,66 @@
 > - **Original agent history files are read-only inputs** and are never
 >   modified. ViewTrace's own recordings are local writes under the data
 >   root (SQLite `viewtrace.db`, per-run `trace.jsonl` and a sanitized live
->   spool, mode 0700/0600 on POSIX). Delete the data root to erase
+>   spool, mode 0700/0600 on POSIX). Explicit delete/keep/prune commands
+>   control individual runs; default retention is indefinite. Delete the data root to erase
 >   everything ViewTrace recorded.
 > - **Private reasoning is never collected.** Declared thinking/analysis
 >   payloads are stripped before anything touches disk; provenance labels
 >   (agent-reported / observed / inferred) are preserved exactly as claimed,
 >   never promoted.
 > - The legacy `agent-pigeon` flight recorder below is unchanged.
+
+## ViewTrace: Answer → Reveal
+
+The reference adapter is the only supported research/receipt producer. This
+demo reads a synthetic multi-turn fixture, not a real agent history:
+
+```sh
+viewtrace up
+viewtrace ingest fixtures/viewtrace/answer-multi-turn.jsonl
+viewtrace --agent reference-agent --session session-1 --turn turn-2 --url-only
+# http://127.0.0.1:7331/runs/receipt-multi/answers/A2
+viewtrace --receipt receipt-A1 --url-only
+viewtrace --url-only                     # recent answer/trace picker
+viewtrace --select receipt-A3 --url-only  # records explicit user selection
+viewtrace open latest --url-only         # run exploration; association UNKNOWN
+viewtrace keep receipt-multi
+viewtrace keep receipt-multi --release
+viewtrace prune --before 2026-10-01T00:00:00Z
+viewtrace delete receipt-multi           # all answers + exports + artifacts
+viewtrace down
+```
+
+Use `--data-root <dir>` on commands to isolate local recordings. `up` starts
+both collector and report; the default report port is 7331. An occupied port
+fails startup; ViewTrace never connects to the occupying service. Explicit
+`up --report-port 0` uses an OS-assigned port for isolated roots. `status --json`
+reports the ready URL. Bare reveal never starts capture or installs hooks.
+
+Resolution is agent namespace + session + turn, then explicit receipt ID,
+with a versioned answer hash as corroboration only. Supplied identifiers must
+all agree. Repeated/revised final answers for a turn, conflicts, missing
+identity or unknown scope go to a picker. Hash, cwd, latest and timestamps
+never prove a current-answer match. Missing/deleted answers never fall back
+to another answer. A user's selection is displayed as `explicit-selection`;
+a direct saved link is `explicit-link`, with current-answer match UNKNOWN.
+These describe local navigation, not verified factual support.
+
+The minimum report shows the stored answer, receipt, explicit own/shared
+event scope, lifecycle, collection completeness and sanitized diagnostics/raw
+events. Evidence support stays UNKNOWN until M3. Recorded provenance labels
+remain claims; no rationale, evidence, private reasoning or turn identities
+are invented. Polling every 2 seconds keeps the same answer identity,
+marks an unreachable snapshot STALE, retries and deduplicates event pages.
+
+Non-TTY and headless use URL-only/text or `--json` candidates, including an
+explicit `--select` path. Interactive TTY has a numbered picker and Enter to
+cancel. Browser launch uses argv without a shell; failure leaves the safe URL.
+See [the reference receipt and HTTP contract](docs/viewtrace-reveal.md).
+
+For development, run `npm ci` and `npx playwright install --with-deps chromium`
+before `npm test`. Chromium is required for the DOM tests; Playwright is a
+pinned development dependency and is not needed by the installed public bin.
 
 **A flight recorder for coding agents.**
 

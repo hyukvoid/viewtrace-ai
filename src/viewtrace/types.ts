@@ -300,7 +300,7 @@ export type DomainPayload =
 /* Trace records (one JSONL line each)                                 */
 /* ------------------------------------------------------------------ */
 
-export const RECORD_KINDS = ['event', 'run'] as const;
+export const RECORD_KINDS = ['event', 'run', 'answer'] as const;
 export type RecordKind = (typeof RECORD_KINDS)[number];
 
 export interface ViewTraceEvent {
@@ -338,7 +338,7 @@ export interface RunRecordLine {
   readonly detail?: string;
 }
 
-export type TraceRecord = ViewTraceEvent | RunRecordLine;
+export type TraceRecord = ViewTraceEvent | RunRecordLine | import('./answer.js').AnswerReceipt;
 
 /* ------------------------------------------------------------------ */
 /* Diagnostics and ingest results                                      */

@@ -12,6 +12,8 @@ import { appendFile, mkdir, rename, stat } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
+import { startReportServer } from './server.js';
+import type { ReportServer } from './server.js';
 import { LiveCollector } from './collector.js';
 import { startControlServer } from './control.js';
 import type { ControlResponse, ControlServer } from './control.js';
@@ -92,6 +94,7 @@ async function main(): Promise<void> {
   let timer: NodeJS.Timeout | null = null;
   let heartbeat: NodeJS.Timeout | null = null;
   let controlRef: ControlServer | null = null;
+  let reportRef: ReportServer | null = null;
 
   const graceful = async (reason: string, code: number): Promise<void> => {
     if (shuttingDown) return;
@@ -103,6 +106,7 @@ async function main(): Promise<void> {
     } catch {
       /* committed state stays consistent; next boot resumes from the cursor */
     }
+    if (reportRef !== null) await reportRef.close();
     if (controlRef !== null) {
       try {
         await controlRef.close();
@@ -121,48 +125,66 @@ async function main(): Promise<void> {
     process.exit(code);
   };
 
-  const control = await startControlServer(({ method, pathname }): ControlResponse | Promise<ControlResponse> => {
-    if (pathname === '/health') {
-      if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
-      return {
-        status: 200,
-        body: {
-          ok: true,
-          service: 'viewtrace-collector',
-          protocolVersion: SERVICE_PROTOCOL_VERSION,
-          pid: process.pid,
-          bootId,
-          boundAddress: controlRef?.boundAddress ?? '127.0.0.1',
-          port: controlRef?.port ?? 0,
-          uptimeMs: Date.now() - startedAtMs,
-        },
-      };
-    }
-    if (pathname === '/runs') {
-      if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
-      // Snapshot only (never blocks on a drain): the poll loop keeps it fresh.
-      return collector.snapshot().then((runs) => ({ status: 200, body: { runs } }));
-    }
-    const runMatch = /^\/runs\/([^/]+)$/.exec(pathname);
-    if (runMatch !== null) {
-      if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
-      const runId = decodeURIComponent(runMatch[1] ?? '');
-      if (!RUN_ID_PATTERN.test(runId)) return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
-      const snapshot = collector.snapshot().then((runs) => runs.find((r) => r.runId === runId));
-      return snapshot.then((run) => {
-        if (run === undefined) return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
-        const diagnostics = store.listDiagnostics(runId).slice(-50);
-        const duplicates = store.listDuplicates(runId);
-        return { status: 200, body: { run, diagnostics, duplicates } };
-      });
-    }
-    if (pathname === '/shutdown') {
-      if (method !== 'POST') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
-      queueMicrotask(() => void graceful('api', 0));
-      return { status: 200, body: { ok: true, shuttingDown: true } };
-    }
-    return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
-  });
+  const portIndex = process.argv.indexOf('--report-port');
+  const reportPort = portIndex < 0 ? 7331 : Number(process.argv[portIndex + 1]);
+  if (!Number.isInteger(reportPort) || reportPort < 0 || reportPort > 65535) {
+    await graceful('invalid-report-port', 1);
+    return;
+  }
+  try {
+    reportRef = await startReportServer(store, { port: reportPort, bootId });
+  } catch {
+    await log(dataRoot, 'boot refused: report port unavailable or report startup failed');
+    await graceful('report-startup-failed', 1);
+    return;
+  }
+
+  const control = await startControlServer(
+    ({ method, pathname }): ControlResponse | Promise<ControlResponse> => {
+      if (pathname === '/health') {
+        if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
+        return {
+          status: 200,
+          body: {
+            ok: true,
+            service: 'viewtrace-collector',
+            protocolVersion: SERVICE_PROTOCOL_VERSION,
+            pid: process.pid,
+            bootId,
+            boundAddress: controlRef?.boundAddress ?? '127.0.0.1',
+            port: controlRef?.port ?? 0,
+            reportPort: reportRef?.port,
+            reportReady: reportRef !== null,
+            uptimeMs: Date.now() - startedAtMs,
+          },
+        };
+      }
+      if (pathname === '/runs') {
+        if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
+        // Snapshot only (never blocks on a drain): the poll loop keeps it fresh.
+        return collector.snapshot().then((runs) => ({ status: 200, body: { runs } }));
+      }
+      const runMatch = /^\/runs\/([^/]+)$/.exec(pathname);
+      if (runMatch !== null) {
+        if (method !== 'GET') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
+        const runId = decodeURIComponent(runMatch[1] ?? '');
+        if (!RUN_ID_PATTERN.test(runId)) return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
+        const snapshot = collector.snapshot().then((runs) => runs.find((r) => r.runId === runId));
+        return snapshot.then((run) => {
+          if (run === undefined) return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
+          const diagnostics = store.listDiagnostics(runId).slice(-50);
+          const duplicates = store.listDuplicates(runId);
+          return { status: 200, body: { run, diagnostics, duplicates } };
+        });
+      }
+      if (pathname === '/shutdown') {
+        if (method !== 'POST') return { status: 405, body: { error: { code: 'METHOD_NOT_ALLOWED' } } };
+        queueMicrotask(() => void graceful('api', 0));
+        return { status: 200, body: { ok: true, shuttingDown: true } };
+      }
+      return { status: 404, body: { error: { code: 'NOT_FOUND' } } };
+    },
+  );
 
   controlRef = control;
 
@@ -171,6 +193,8 @@ async function main(): Promise<void> {
     pid: process.pid,
     bootId,
     port: control.port,
+    reportPort: reportRef.port,
+    reportToken: reportRef.token,
     token: control.token,
     startedAt: new Date(startedAtMs).toISOString(),
   };

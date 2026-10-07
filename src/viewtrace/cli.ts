@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * viewtrace — CLI entry point for ViewTrace AI (M1: live CLI trace).
- *
- * M0 provided batch ingest of reference JSONL traces; M1 adds the collector
- * lifecycle (up/status/down), wrapped reference-producer runs with live
- * terminal activity, and honest exit codes. The local report server (`open`)
- * is still M2 — `open latest` verifies the run but never prints a URL.
+ * ViewTrace CLI: collector lifecycle, explicit reference capture and local
+ * answer reveal. Association is resolved from supplied identity, never cwd,
+ * latest, timestamps or a standalone answer hash.
  */
 
+import { reveal, reportMutation, reportConnection } from './reveal.js';
+import { parseAnswerContext } from './resolver.js';
+import { isValidRunId, isValidTimestamp } from './validate.js';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
@@ -57,7 +57,7 @@ Privacy and storage:
     everything ViewTrace recorded.
 
 Collector lifecycle:
-  viewtrace up [--data-root <dir>] [--json]
+  viewtrace up [--data-root <dir>] [--report-port <port>] [--json]
       Start (or confirm) the background collector service and wait for
       readiness. Idempotent — safe to run repeatedly.
   viewtrace status [--data-root <dir>] [--json]
@@ -87,16 +87,27 @@ Batch/query (M0 commands, unchanged):
   viewtrace replay <runId> [--data-root <dir>] [--json]
   viewtrace adapters [--json]
 
-Report (M2 scope):
-  viewtrace open latest
-      Confirms the latest run exists and where it is stored. The local
-      report server itself ships in M2 — this intentionally opens nothing
-      and exits 3 until then.
+Reveal (M2, reference adapter only):
+  viewtrace [--receipt <id> | --agent <id> --session <id> --turn <id>]
+            [--answer-hash <sha256> --hash-version <policy>] [--url-only] [--json]
+            [--select <receiptId|runId>] [--data-root <dir>]
+      Reveal a saved answer by explicit identity. Context comes only from
+      these flags. Hash alone, cwd, timestamps and latest never establish
+      a match. Uncertain/mismatch/missing context opens a recent picker.
+      Non-TTY prints JSON/candidates or a safe URL. No capture is started.
+  viewtrace open latest [--url-only] [--data-root <dir>]
+      Open the latest run exploration container; answer association UNKNOWN.
+  viewtrace delete <runId> | keep <runId> [--release]
+  viewtrace prune --before <ISO timestamp> [--data-root <dir>]
+      Authenticated local mutations; active runs cannot be deleted. Default
+      retention is indefinite. Keep excludes a run from explicit age pruning.
+      Delete removes all receipts and artifacts for that run. The service
+      must be ready. The report binds 127.0.0.1:7331 by default; an explicit
+      --report-port 0 requests an OS-assigned port for isolated roots.
 
 Exit codes:
   0  success   1  runtime failure / not running / unknown run
   2  usage, unsupported adapter, or collector not running (for run)
-  3  feature not implemented yet (report server)
   4  producer exited 0 but the collection is PARTIAL/UNKNOWN or unconfirmed
   127 producer could not be spawned
   130/143  cancelled by SIGINT/SIGTERM (a CANCELLED record is committed)
@@ -142,8 +153,23 @@ interface CliArgs {
   flags: Map<string, string | boolean>;
 }
 
-const VALUE_FLAGS = new Set(['--data-root', '--adapter', '--latency-log']);
-const BOOLEAN_FLAGS = new Set(['--json']);
+const VALUE_FLAGS = new Set([
+  '--data-root',
+  '--adapter',
+  '--latency-log',
+  '--report-port',
+  '--receipt',
+  '--agent',
+  '--session',
+  '--turn',
+  '--answer',
+  '--run-id',
+  '--answer-hash',
+  '--hash-version',
+  '--select',
+  '--before',
+]);
+const BOOLEAN_FLAGS = new Set(['--json', '--url-only', '--release']);
 
 function parseArgs(argv: readonly string[], allowUnknown = false): CliArgs {
   const positional: string[] = [];
@@ -195,11 +221,17 @@ async function ensureRootDirs(dataRoot: string): Promise<void> {
   await mkdir(logsDir(dataRoot), { recursive: true, mode: 0o700 });
 }
 
-async function cmdUp(dataRoot: string, json: boolean): Promise<number> {
+async function cmdUp(dataRoot: string, json: boolean, reportPort = 7331): Promise<number> {
   const existing = await readServiceFile(dataRoot);
   if (existing !== null) {
     const probe = await probeService(existing);
     if (probe.state === 'running') {
+      try {
+        await reportConnection(dataRoot);
+      } catch {
+        process.stderr.write('viewtrace: collector is running but report is unavailable; use down then up\n');
+        return 1;
+      }
       // Repair any identity drift in the state file from live health data
       // (best-effort: a concurrent writer or the service heartbeat may
       // already have restored it).
@@ -215,7 +247,13 @@ async function cmdUp(dataRoot: string, json: boolean): Promise<number> {
       }
       if (json) {
         process.stdout.write(
-          JSON.stringify({ running: true, alreadyRunning: true, pid: probe.health.pid, dataRoot }) + '\n',
+          JSON.stringify({
+            running: true,
+            alreadyRunning: true,
+            pid: probe.health.pid,
+            reportUrl: `http://127.0.0.1:${probe.health.reportPort}`,
+            dataRoot,
+          }) + '\n',
         );
       } else {
         process.stdout.write(`collector already running (pid ${probe.health.pid}) — nothing to do\n`);
@@ -226,23 +264,51 @@ async function cmdUp(dataRoot: string, json: boolean): Promise<number> {
 
   await ensureRootDirs(dataRoot);
   const serviceJs = join(dirname(fileURLToPath(import.meta.url)), 'service.js');
-  const child = spawn(process.execPath, [serviceJs, '--data-root', dataRoot], {
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: true,
+  const child = spawn(
+    process.execPath,
+    [serviceJs, '--data-root', dataRoot, '--report-port', String(reportPort)],
+    {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    },
+  );
+  let startupFailed = false;
+  child.once('exit', (code) => {
+    if (code !== 0) startupFailed = true;
   });
   child.unref();
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
+    if (startupFailed) {
+      process.stderr.write(
+        'viewtrace: service startup failed; report port may be occupied; see service.log\n',
+      );
+      return 1;
+    }
     const info = await readServiceFile(dataRoot);
     if (info !== null) {
       const probe = await probeService(info);
       if (probe.state === 'running') {
+        try {
+          await reportConnection(dataRoot);
+        } catch {
+          await sleep(100);
+          continue;
+        }
         if (json) {
-          process.stdout.write(JSON.stringify({ running: true, pid: probe.health.pid, dataRoot }) + '\n');
+          process.stdout.write(
+            JSON.stringify({
+              running: true,
+              pid: probe.health.pid,
+              reportUrl: `http://127.0.0.1:${probe.health.reportPort}`,
+              dataRoot,
+            }) + '\n',
+          );
         } else {
           process.stdout.write(`collector up: pid ${probe.health.pid} (127.0.0.1:${probe.info.port})\n`);
+          process.stdout.write(`  report:    http://127.0.0.1:${probe.health.reportPort}\n`);
           process.stdout.write(`  data root: ${dataRoot}\n`);
           process.stdout.write(`  log:       ${join(logsDir(dataRoot), 'service.log')}\n`);
         }
@@ -266,8 +332,16 @@ async function cmdStatus(dataRoot: string, json: boolean): Promise<number> {
   }
   const probe = await probeService(info);
   if (probe.state !== 'running') {
-    if (json) process.stdout.write(JSON.stringify({ running: false, reason: 'stale', detail: probe.reason }) + '\n');
+    if (json)
+      process.stdout.write(JSON.stringify({ running: false, reason: 'stale', detail: probe.reason }) + '\n');
     else process.stdout.write(`collector not running (stale state: ${probe.reason})\n`);
+    return 1;
+  }
+  try {
+    await reportConnection(dataRoot);
+  } catch {
+    if (json) process.stdout.write(JSON.stringify({ running: false, reason: 'report-not-ready' }) + '\n');
+    else process.stdout.write('collector report not ready (identity or readiness mismatch)\n');
     return 1;
   }
   let runs: { runs?: unknown[] } | null = null;
@@ -290,14 +364,20 @@ async function cmdStatus(dataRoot: string, json: boolean): Promise<number> {
         pid: probe.health.pid,
         uptimeMs: probe.health.uptimeMs,
         boundAddress: probe.health.boundAddress,
+        reportReady: probe.health.reportReady ?? false,
+        reportUrl: probe.health.reportPort ? `http://127.0.0.1:${probe.health.reportPort}` : null,
         dataRoot,
         runs: runs?.runs ?? null,
       }) + '\n',
     );
   } else {
-    process.stdout.write(`collector running: pid ${probe.health.pid}, up ${Math.round(probe.health.uptimeMs / 1000)}s\n`);
+    process.stdout.write(
+      `collector running: pid ${probe.health.pid}, up ${Math.round(probe.health.uptimeMs / 1000)}s\n`,
+    );
     process.stdout.write(`  data root: ${dataRoot}\n`);
-    const list = Array.isArray(runs?.runs) ? (runs?.runs as { runId: string; lifecycle: string; completeness: string; pendingBytes: number }[]) : [];
+    const list = Array.isArray(runs?.runs)
+      ? (runs?.runs as { runId: string; lifecycle: string; completeness: string; pendingBytes: number }[])
+      : [];
     if (list.length === 0) process.stdout.write('  runs: none recorded on this root\n');
     for (const run of list) {
       process.stdout.write(
@@ -336,7 +416,9 @@ async function cmdDown(dataRoot: string): Promise<number> {
       return 1;
     }
   } catch (e) {
-    process.stderr.write(`${PROGRAM}: shutdown request failed (${e instanceof Error ? e.message : String(e)})\n`);
+    process.stderr.write(
+      `${PROGRAM}: shutdown request failed (${e instanceof Error ? e.message : String(e)})\n`,
+    );
     return 1;
   }
   const deadline = Date.now() + 10_000;
@@ -405,29 +487,28 @@ async function cmdReplay(runId: string | undefined, dataRoot: string, json: bool
   return 0;
 }
 
-async function cmdOpenLatest(dataRoot: string): Promise<number> {
-  const store = await ViewTraceStore.openQuery(dataRoot);
-  try {
-    const runs = store === null ? [] : store.listRuns();
-    if (runs.length === 0) {
-      process.stdout.write('no runs recorded yet — nothing to open\n');
-      return 1;
-    }
-    let latest = runs[0] as (typeof runs)[number];
-    for (const run of runs) {
-      if (run.updatedAt > latest.updatedAt || (run.updatedAt === latest.updatedAt && run.runId > latest.runId)) {
-        latest = run;
-      }
-    }
-    process.stdout.write(`latest run: ${latest.runId} (${latest.lifecycle} / ${latest.completeness}, ${latest.eventCount} events)\n`);
-    process.stdout.write(`stored at:  ${dataRoot} (runs/${latest.runId}/trace.jsonl)\n`);
-    process.stdout.write(
-      'local report server: not implemented yet (planned for M2) — no URL is opened.\n',
-    );
-    return 3;
-  } finally {
-    await store?.close();
-  }
+function revealArgs(args: CliArgs, latest = false): Promise<number> {
+  const mapping: Record<string, string> = {
+    receipt: 'receiptId',
+    agent: 'agentId',
+    session: 'agentSessionId',
+    turn: 'turnId',
+    answer: 'answerId',
+    'run-id': 'runId',
+    'answer-hash': 'answerHash',
+    'hash-version': 'hashVersion',
+  };
+  const raw: Record<string, unknown> = {};
+  for (const [flag, key] of Object.entries(mapping))
+    if (args.flags.has(flag)) raw[key] = args.flags.get(flag);
+  return reveal({
+    dataRoot: dataRootOf(args.flags),
+    context: parseAnswerContext(raw),
+    json: args.flags.get('json') === true,
+    urlOnly: args.flags.get('url-only') === true,
+    latest,
+    select: typeof args.flags.get('select') === 'string' ? (args.flags.get('select') as string) : undefined,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -437,7 +518,8 @@ async function cmdOpenLatest(dataRoot: string): Promise<number> {
 async function main(argv: readonly string[]): Promise<number> {
   const first = argv[0];
 
-  if (argv.length === 0) return usage('no command given');
+  if (argv.length === 0 || (first?.startsWith('--') && first !== '--help' && first !== '--version'))
+    return revealArgs(parseArgs(argv));
   if (first === '--help' || first === '-h') {
     process.stdout.write(HELP);
     return 0;
@@ -453,7 +535,9 @@ async function main(argv: readonly string[]): Promise<number> {
   switch (command) {
     case 'up': {
       const args = parseArgs(rest);
-      return cmdUp(dataRootOf(args.flags), args.flags.get('json') === true);
+      const port = Number(args.flags.get('report-port') ?? 7331);
+      if (!Number.isInteger(port) || port < 0 || port > 65535) return usage('invalid report port');
+      return cmdUp(dataRootOf(args.flags), args.flags.get('json') === true, port);
     }
     case 'status': {
       const args = parseArgs(rest);
@@ -471,7 +555,10 @@ async function main(argv: readonly string[]): Promise<number> {
       if (producerArgv.length === 0) {
         return usage('run requires a producer: viewtrace run [--options] -- <command> [args...]');
       }
-      const adapterId = typeof args.flags.get('adapter') === 'string' ? (args.flags.get('adapter') as string) : REFERENCE_ADAPTER_ID;
+      const adapterId =
+        typeof args.flags.get('adapter') === 'string'
+          ? (args.flags.get('adapter') as string)
+          : REFERENCE_ADAPTER_ID;
       const adapter = getAdapter(adapterId);
       if (adapter === null || adapter.status !== 'REFERENCE') {
         process.stderr.write(
@@ -485,14 +572,43 @@ async function main(argv: readonly string[]): Promise<number> {
         adapter,
         json: args.flags.get('json') === true,
         latencyLogPath:
-          typeof args.flags.get('latency-log') === 'string' ? (args.flags.get('latency-log') as string) : undefined,
+          typeof args.flags.get('latency-log') === 'string'
+            ? (args.flags.get('latency-log') as string)
+            : undefined,
       });
     }
     case 'open': {
       const args = parseArgs(rest);
       const target = args.positional[0] ?? 'latest';
-      if (target !== 'latest') return usage("only 'open latest' exists in M1 (report server is M2 scope)");
-      return cmdOpenLatest(dataRootOf(args.flags));
+      if (target !== 'latest')
+        return usage("open supports only 'latest'; use --receipt or --select for an answer");
+      return revealArgs(args, true);
+    }
+    case 'reveal': {
+      return revealArgs(parseArgs(rest));
+    }
+    case 'delete':
+    case 'keep': {
+      const args = parseArgs(rest);
+      const id = args.positional[0];
+      if (!id || !isValidRunId(id)) return usage(`${command} requires a valid run id`);
+      const result = await reportMutation(
+        dataRootOf(args.flags),
+        `/api/runs/${id}${command === 'keep' ? '/keep' : ''}`,
+        command === 'delete' ? 'DELETE' : 'POST',
+        command === 'keep' ? { keep: args.flags.get('release') !== true } : undefined,
+      );
+      process.stdout.write(JSON.stringify(result.json) + '\n');
+      return 0;
+    }
+    case 'prune': {
+      const args = parseArgs(rest);
+      const before = args.flags.get('before');
+      if (typeof before !== 'string' || !isValidTimestamp(before))
+        return usage('prune requires --before <ISO timestamp>');
+      const result = await reportMutation(dataRootOf(args.flags), '/api/retention', 'POST', { before });
+      process.stdout.write(JSON.stringify(result.json) + '\n');
+      return 0;
     }
     case 'adapters': {
       const args = parseArgs(rest);
@@ -530,7 +646,9 @@ async function main(argv: readonly string[]): Promise<number> {
         const unverified = outcome.replayChecks.filter((c) => !c.verified);
         if (unverified.length > 0) {
           for (const check of unverified) {
-            process.stderr.write(`${PROGRAM}: replay verification FAILED for ${check.runId}: ${check.mismatch}\n`);
+            process.stderr.write(
+              `${PROGRAM}: replay verification FAILED for ${check.runId}: ${check.mismatch}\n`,
+            );
           }
           return 1;
         }
@@ -576,7 +694,9 @@ function printIngest(outcome: Awaited<ReturnType<typeof ingestFile>>): void {
   for (const d of outcome.diagnostics) {
     process.stdout.write(`  [${d.severity}] ${d.code}: ${d.message}\n`);
   }
-  process.stdout.write(`replay verification: ${outcome.replayChecks.every((c) => c.verified) ? 'OK' : 'FAILED'}\n`);
+  process.stdout.write(
+    `replay verification: ${outcome.replayChecks.every((c) => c.verified) ? 'OK' : 'FAILED'}\n`,
+  );
   process.stdout.write(`data root: ${outcome.dataRoot}\n`);
 }
 

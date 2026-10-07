@@ -217,6 +217,7 @@ export function controlRequest(options: {
   readonly method: string;
   readonly path: string;
   readonly timeoutMs?: number;
+  readonly body?: unknown;
 }): Promise<ControlClientResult> {
   return new Promise((resolveReq, rejectReq) => {
     const req = http.request(
@@ -225,7 +226,7 @@ export function controlRequest(options: {
         port: options.port,
         method: options.method,
         path: options.path,
-        headers: { authorization: `Bearer ${options.token}` },
+        headers: { authorization: `Bearer ${options.token}`, ...(options.body === undefined ? {} : { 'Content-Type':'application/json' }) },
         timeout: options.timeoutMs ?? 3000,
       },
       (res) => {
@@ -244,7 +245,7 @@ export function controlRequest(options: {
     );
     req.on('timeout', () => req.destroy(new Error('CONTROL_TIMEOUT')));
     req.on('error', rejectReq);
-    req.end();
+    req.end(options.body === undefined ? undefined : JSON.stringify(options.body));
   });
 }
 
@@ -256,6 +257,8 @@ export interface HealthInfo {
   readonly bootId: string;
   readonly boundAddress: string;
   readonly uptimeMs: number;
+  readonly reportPort?: number;
+  readonly reportReady?: boolean;
 }
 
 export type ProbeOutcome =

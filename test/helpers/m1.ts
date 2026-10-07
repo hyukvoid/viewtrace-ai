@@ -30,9 +30,10 @@ export interface RunBinOptions {
 
 /** Runs the public bin as a real subprocess and captures its output. */
 export function runBin(args: readonly string[], options: RunBinOptions = {}): Promise<BinResult> {
+  const binArgs = args[0] === 'up' && !args.includes('--report-port') ? [...args, '--report-port', '0'] : args;
   const timeoutMs = options.timeoutMs ?? 90_000;
   return new Promise((resolveRun, rejectRun) => {
-    const child = spawn(process.execPath, [cliDist, ...args], {
+    const child = spawn(process.execPath, [cliDist, ...binArgs], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...options.env } as NodeJS.ProcessEnv,
       cwd: options.cwd,

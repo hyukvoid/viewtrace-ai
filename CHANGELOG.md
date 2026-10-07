@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased — ViewTrace M2
+
+- Final public AnswerReceipt v1, immutable finalization, sanitized versioned
+  hashes, transactional SQLite v2 migration and explicit own/shared scope.
+- Shared resolver, bare reveal/picker, explicit selection, safe URL-only
+  reveal and latest-run exploration. Uncertain or conflicting identity never
+  auto-matches by hash, latest, cwd or timestamp.
+- Loopback report/API on 7331, paginated sanitized events, polling/stale
+  recovery, Host/Origin/cookie/bearer/CSP boundaries, delete/keep/prune and
+  tombstone recovery. Evidence analysis and real agent research adapters
+  remain M3/M5 work.
+- Mandatory actual HTTP/public-bin/Chromium DOM tests; no runtime dependencies.
+
 ## 0.3.0 — problem-first live radar
 
 The first screen is no longer a session browser. It answers one question in

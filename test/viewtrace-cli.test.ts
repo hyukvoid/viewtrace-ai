@@ -46,23 +46,20 @@ describe('viewtrace CLI: help and version', () => {
   });
 
   it('rejects usage errors with nonzero exit codes', async () => {
-    assert.equal((await runCli([])).code, 2);
+    const empty = await mkdtemp(join(tmpdir(), 'vt-bare-'));
+    assert.equal((await runCli(['--data-root', empty, '--json'])).code, 1, 'bare command reveals an empty picker without capture');
     assert.equal((await runCli(['definitely-not-a-command'])).code, 2);
     assert.equal((await runCli(['run'])).code, 2, 'run without a producer is a usage error');
     assert.equal((await runCli(['ingest'])).code, 2);
   });
 
-  it('keeps `open` explicitly unimplemented until M2 (exit 3)', async () => {
-    // M0 asserted exit 3 for up/down/status/run/open. Since M1 the lifecycle
-    // commands are implemented; only the report-server command stays exit 3.
-    // (Stronger lifecycle behaviour is covered by the M1 test files.)
-    const root = await mkdtemp(join(tmpdir(), 'vt-open3-'));
+  it('open latest requires a ready M2 report and never fabricates a URL', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'vt-open-'));
     await runCli(['ingest', viewtraceFixture('research-normal.jsonl'), '--data-root', root]);
-    const { stdout, code } = await runCli(['open', 'latest', '--data-root', root]);
-    assert.equal(code, 3);
-    assert.ok(stdout.includes('research-normal-001'));
-    assert.ok(stdout.includes('M2'));
-    assert.ok((await runCli(['--help'])).stdout.includes('not implemented yet'));
+    const { stdout, code } = await runCli(['open', 'latest', '--url-only', '--data-root', root]);
+    assert.equal(code, 1);
+    assert.equal(JSON.parse(stdout).ready, false);
+    assert.ok(!/http:\/\//.test(stdout), 'no unverified listener URL');
   });
 });
 

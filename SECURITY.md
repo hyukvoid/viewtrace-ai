@@ -14,9 +14,9 @@ This repository ships two products with two data policies.
   and turn counts. Source code, diffs, shell commands, prompts, reasoning and
   transcript text are **never** included in output.
 
-## ViewTrace AI — local storage, loopback-only control, zero external network
+## ViewTrace AI — local storage, loopback-only collector and report, zero external network
 
-ViewTrace (`viewtrace` bin, M1 — live CLI trace) is a **local-write,
+ViewTrace (`viewtrace` bin, M2 — AnswerReceipt & Local Reveal) is a **local-write,
 zero-external-network** product. Its inputs and outputs are strictly
 separated:
 
@@ -27,7 +27,7 @@ separated:
   shell in between, so producer arguments cannot be interpolated.
 - **Writes:** only inside one data root (default `~/.viewtrace`, override with
   `--data-root` or `VIEWTRACE_DATA_ROOT`):
-  - `viewtrace.db` — the authoritative SQLite store (schema version 1,
+  - `viewtrace.db` — the authoritative SQLite store (schema version 2,
     migrated transactionally; future versions are refused, never guessed)
   - `runs/<runId>/trace.jsonl` — a derived, minimized replay export
   - `live/<runId>/stream.jsonl` — the live spool: producer stdout already
@@ -52,9 +52,30 @@ separated:
   stacks. Shutdown (`viewtrace down`) goes through this authenticated API —
   the CLI never kills a pid blindly (PID reuse safety), and `down` only
   stops the collector it owns; committed events are preserved.
-- **Deletion / data lifetime:** data lives until you delete it. Remove the
-  data root directory to erase everything ViewTrace recorded (store, spools
-  and logs together).
+- **Report channel (M2):** IPv4 `127.0.0.1:7331` by default, with a separate
+  per-process secret. An explicit alternate port is supported; conflicts fail
+  startup. Every API read/mutation requires bearer authentication or a
+  same-site HttpOnly session cookie issued by a guarded local HTML navigation.
+  Host must match the actual bound port, Origin must match that Host, and
+  cross-site Fetch Metadata is refused, including page/cookie bootstrap.
+  Cookie mutations require same-origin Origin; CLI mutations use the bearer.
+  No CORS. CSP disallows inline script, external assets and framing; text is
+  rendered with textContent. Source links permit only http(s) without URL
+  userinfo and require an explicit click. No source is fetched by ViewTrace.
+  Body cap is 4 KiB, URLs 2 KiB, pages 1–100 events with a 1 MiB byte budget
+  (one accepted record at most 1 MiB). Diagnostics/history are capped at 100
+  with full counts. Static assets have a fixed allowlist and realpath/symlink
+  checks. There are no arbitrary-path/SQL HTTP parameters. Errors are codes.
+- **Deletion / data lifetime:** default retention is indefinite. Authenticated
+  `delete <runId>` removes that run's receipts, scopes, selections, DB records,
+  replay JSONL, spool and run-scoped evidence/artifacts; unrelated runs and
+  original history are preserved. Active CREATED/RUNNING runs are refused.
+  `keep` excludes a run from explicit `prune --before <ISO timestamp>`;
+  explicit deletion still works for kept runs. A DB tombstone commits before
+  filesystem cleanup; restart finishes cleanup, never resurrects receipts or
+  reuses a deleted run ID. A cleanup failure stays an error. Remove the data
+  root to erase everything including service logs and tombstones. SQLite
+  deletion is logical deletion, not forensic secure erasure of device sectors.
 - **Network:** zero external requests, ever — no cloud, no accounts, no
   telemetry, no API keys, no URL fetching. The only sockets the runtime
   opens are loopback connections to its own collector (verified by a
@@ -66,13 +87,20 @@ separated:
   duplicate/conflict records. Declared private-reasoning fields
   (`thinking`, `reasoning`, `analysis`, encrypted content, …) are stripped
   before anything is stored, spooled or echoed; diagnostic messages carry
-  codes and positions, never record content. Free text that arrives through
-  allowed fields is stored as-is — ViewTrace does not claim free text is
-  safe based on keyword scanning.
+  codes and positions, never record content. Declared credential fields and
+  recognizable token/credential/URL query forms are redacted before storage
+  and receipt hashing. This is not a guarantee that arbitrary allowed free
+  text contains no personal information. Reference producers must emit only
+  public final answers and allowed tool records, not hidden reasoning.
+  Receipt v1 hashes normalized sanitized final text (NFC and LF, SHA-256;
+  whitespace/case otherwise preserved). Original secrets are never copied
+  just for hash corroboration. Draft answers are rejected. Hash alone cannot
+  establish exact answer identity.
 - **SQLite driver:** Node's built-in `node:sqlite` (requires Node >= 22.13).
   No native addon, no third-party runtime dependency, no install scripts.
   All SQL uses parameter binding; the database is never deleted implicitly.
-  The collector service is the single writer; CLI queries open read-only
+  Store/asset paths reject symlinks and junctions inside their local root.
+  The collector service owns HTTP mutations; CLI queries open read-only
   connections and never run recovery.
 
 ## Reporting a vulnerability

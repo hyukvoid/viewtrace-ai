@@ -175,12 +175,13 @@ run('COMPLETED');
     assert.ok(sentinelReport.loopbackUses.length > 0, 'loopback control traffic is visible in the report');
   });
 
-  it('open latest: verifies the run, never prints a URL, exits 3', async () => {
-    const withRuns = await runBin(['open', 'latest', '--data-root', root]);
-    assert.equal(withRuns.code, 3);
+  it('open latest: ready URL opens a run container and never claims exact answer association', async () => {
+    const withRuns = await runBin(['open', 'latest', '--url-only', '--data-root', root]);
+    assert.equal(withRuns.code, 0);
     assert.ok(withRuns.stdout.includes('latest run:'), withRuns.stdout);
-    assert.ok(withRuns.stdout.includes('M2'), 'must state the report server is not implemented');
-    assert.ok(!/https?:\/\//.test(withRuns.stdout), 'no URL may be presented as a link');
+    assert.ok(withRuns.stdout.includes('association UNKNOWN'));
+    assert.match(withRuns.stdout, /http:\/\/127\.0\.0\.1:\d+\/runs\//);
+    assert.ok(!withRuns.stdout.includes('/answers/'));
 
     const emptyRoot = await mkdtemp(join(tmpdir(), 'vt-open-'));
     try {

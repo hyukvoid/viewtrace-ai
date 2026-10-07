@@ -20,6 +20,7 @@ import { parseJsonlFile } from './jsonl.js';
 import { validateRecord } from './validate.js';
 import { canonicalize } from './canonical.js';
 import type {
+  CollectionCompleteness,
   Diagnostic,
   DuplicateInfo,
   IngestResult,
@@ -55,6 +56,7 @@ interface RunAccumulator {
   storedRecords: StoredRecord[];
   duplicates: DuplicateInfo[];
   diagnostics: Diagnostic[];
+  completeness: CollectionCompleteness;
 }
 
 export async function ingestFile(inputPath: string, options: IngestOptions): Promise<IngestOutcome> {
@@ -101,6 +103,7 @@ export async function ingestFile(inputPath: string, options: IngestOptions): Pro
         storedRecords: [],
         duplicates: [],
         diagnostics: [],
+        completeness: 'UNKNOWN',
       };
       runs.set(record.runId, acc);
     }
@@ -163,7 +166,17 @@ export async function ingestFile(inputPath: string, options: IngestOptions): Pro
       if (relationDiagnostics.length > 0) {
         await store.appendRecords(acc.runId, [], relationDiagnostics, parsed.totalBytes);
       }
-      await store.setCompleteness(acc.runId, completeness);
+      // Receipt rejections arise in the transactional store, after structural
+      // validation. Preserve their loss status in batch and replay as well.
+      const receiptConflict = store
+        .listDiagnostics(acc.runId)
+        .some(
+          (d) =>
+            d.code === 'RECEIPT_ID_CONFLICT' ||
+            (d.code === 'DUPLICATE_CONFLICTING' && d.severity === 'error'),
+        );
+      acc.completeness = receiptConflict ? 'PARTIAL' : completeness;
+      await store.setCompleteness(acc.runId, acc.completeness);
       // The stored view (including store-generated diagnostics like
       // DUPLICATE_CONFLICTING and RUN_TRANSITION_INVALID) is the replay
       // comparison baseline.
@@ -185,7 +198,7 @@ export async function ingestFile(inputPath: string, options: IngestOptions): Pro
         replayChecks.push({ runId: acc.runId, verified: false, mismatch: 'run missing after reopen' });
         continue;
       }
-      const mismatch = compareReplay(acc, replay, completeness);
+      const mismatch = compareReplay(acc, replay, acc.completeness);
       replayChecks.push({ runId: acc.runId, verified: mismatch === undefined, mismatch });
       runReports.push({
         runId: acc.runId,
@@ -316,10 +329,7 @@ function compareReplay(
     message: d.message,
     eventId: d.eventId,
   });
-  if (
-    canonicalize(acc.diagnostics.map(diagShape)) !==
-    canonicalize(replay.diagnostics.map(diagShape))
-  ) {
+  if (canonicalize(acc.diagnostics.map(diagShape)) !== canonicalize(replay.diagnostics.map(diagShape))) {
     return 'diagnostics differ after reopen';
   }
   const dupShape = (d: DuplicateInfo): unknown => ({

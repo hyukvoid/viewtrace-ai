@@ -384,6 +384,11 @@ async function pumpStdout(
       else emit(formatRunLine(record.lifecycle, record.detail));
       return;
     }
+    if (record.recordKind === 'answer') {
+      if (options.json) emitJson({ type: 'answer', receiptId: record.receiptId, answerId: record.answerId, runId: record.runId, associationCapability: record.agentSessionId && record.turnId ? 'YES' : 'PARTIAL' });
+      else emit(`ANSWER ${record.answerId} — receipt ${record.receiptId}`);
+      return;
+    }
     if (options.json) emitJson(activityJson(record));
     else emit(formatEventLine(record));
     latencies.push({

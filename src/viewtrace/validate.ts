@@ -41,6 +41,8 @@ import type {
   TraceRecord,
   ViewTraceEvent,
 } from './types.js';
+import { ANSWER_HASH_VERSION, answerHash, normalizedAnswer } from './answer.js';
+import { redactSecrets, SECRET_FIELDS } from './privacy.js';
 import { canonicalize } from './canonical.js';
 
 export const MAX_RECORD_BYTES = 1024 * 1024;
@@ -73,15 +75,33 @@ const PRIVATE_FIELD_NAMES = new Set([
 
 /** Windows reserved device names — run IDs become directory names. */
 const RESERVED_NAMES = new Set([
-  'con', 'prn', 'aux', 'nul',
-  'com1', 'com2', 'com3', 'com4', 'com5', 'com6', 'com7', 'com8', 'com9',
-  'lpt1', 'lpt2', 'lpt3', 'lpt4', 'lpt5', 'lpt6', 'lpt7', 'lpt8', 'lpt9',
+  'con',
+  'prn',
+  'aux',
+  'nul',
+  'com1',
+  'com2',
+  'com3',
+  'com4',
+  'com5',
+  'com6',
+  'com7',
+  'com8',
+  'com9',
+  'lpt1',
+  'lpt2',
+  'lpt3',
+  'lpt4',
+  'lpt5',
+  'lpt6',
+  'lpt7',
+  'lpt8',
+  'lpt9',
 ]);
 
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const EVENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const TIMESTAMP_PATTERN =
-  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const TIMESTAMP_PATTERN = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 export interface ValidationOk {
   ok: true;
@@ -147,18 +167,15 @@ export function isValidEventId(value: string): boolean {
 }
 
 /** Recursively strip declared private fields; returns the cleaned copy. */
-function stripPrivateFields(
-  value: unknown,
-  path: string,
-  removed: string[],
-): unknown {
+function stripPrivateFields(value: unknown, path: string, removed: string[]): unknown {
   if (Array.isArray(value)) {
     return value.map((v, i) => stripPrivateFields(v, `${path}[${i}]`, removed));
   }
+  if (typeof value === 'string') return redactSecrets(value);
   if (!isPlainObject(value)) return value;
   const out: Record<string, unknown> = {};
   for (const [key, v] of Object.entries(value)) {
-    if (PRIVATE_FIELD_NAMES.has(key.toLowerCase())) {
+    if (PRIVATE_FIELD_NAMES.has(key.toLowerCase()) || SECRET_FIELDS.has(key.toLowerCase())) {
       removed.push(path ? `${path}.${key}` : key);
       continue;
     }
@@ -199,11 +216,7 @@ function requireString(
   return v;
 }
 
-function optionalString(
-  obj: Record<string, unknown>,
-  key: string,
-  errors: Diagnostic[],
-): string | undefined {
+function optionalString(obj: Record<string, unknown>, key: string, errors: Diagnostic[]): string | undefined {
   const v = obj[key];
   if (v === undefined) return undefined;
   if (typeof v !== 'string') {
@@ -251,9 +264,7 @@ function validateRunIdField(
   const v = requireString(obj, key, label, errors);
   if (v === undefined) return undefined;
   if (!isValidRunId(v)) {
-    errors.push(
-      err('INVALID_RUN_ID', `${label} is not a valid run id (filesystem-safe, non-reserved)`),
-    );
+    errors.push(err('INVALID_RUN_ID', `${label} is not a valid run id (filesystem-safe, non-reserved)`));
     return undefined;
   }
   return v;
@@ -277,10 +288,7 @@ function validateTimestampField(
   return v;
 }
 
-function validateSequence(
-  obj: Record<string, unknown>,
-  errors: Diagnostic[],
-): number | undefined {
+function validateSequence(obj: Record<string, unknown>, errors: Diagnostic[]): number | undefined {
   const v = obj['sequence'];
   if (v === undefined) return undefined;
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) {
@@ -317,7 +325,13 @@ function validateOrigin(
 }
 
 const KNOWN_SOURCE_FIELDS = new Set([
-  'sourceId', 'kind', 'location', 'anchor', 'contentHash', 'accessedAt', 'title',
+  'sourceId',
+  'kind',
+  'location',
+  'anchor',
+  'contentHash',
+  'accessedAt',
+  'title',
 ]);
 
 function validateSource(
@@ -346,7 +360,15 @@ function validateSource(
   const accessedAt = validateTimestampField(raw, 'accessedAt', errors, false);
   const title = optionalString(raw, 'title', errors);
   if (sourceId === undefined) return undefined;
-  const source: SourceReference = { sourceId, kind: sourceKind, location, anchor, contentHash, accessedAt, title };
+  const source: SourceReference = {
+    sourceId,
+    kind: sourceKind,
+    location,
+    anchor,
+    contentHash,
+    accessedAt,
+    title,
+  };
   if (location === undefined && sourceKind !== 'UNKNOWN' && sourceKind !== 'TOOL_RESULT') {
     warnings.push(warn('SOURCE_LOCATION_MISSING', `source ${sourceId} has no recorded location`));
   }
@@ -523,7 +545,8 @@ function validatePayload(
             continue;
           }
           for (const key of Object.keys(item)) {
-            if (!['sourceId', 'title', 'url', 'rank'].includes(key)) unknownFields.push(`payload.results[${i}].${key}`);
+            if (!['sourceId', 'title', 'url', 'rank'].includes(key))
+              unknownFields.push(`payload.results[${i}].${key}`);
           }
           const sid = item['sourceId'];
           if (typeof sid !== 'string' || !isValidEventId(sid)) {
@@ -557,9 +580,7 @@ function validatePayload(
       const text = requireString(raw, 'text', 'payload.text', errors);
       const rawSourceId = raw['sourceId'];
       const sourceId =
-        rawSourceId === undefined
-          ? undefined
-          : validateEventIdField(raw, 'sourceId', 'sourceId', errors);
+        rawSourceId === undefined ? undefined : validateEventIdField(raw, 'sourceId', 'sourceId', errors);
       const anchor = optionalString(raw, 'anchor', errors);
       if (text === undefined) return undefined;
       return { type, text, sourceId, anchor };
@@ -601,7 +622,9 @@ function validatePayload(
             continue;
           }
           if (value !== null && typeof value !== 'string' && typeof value !== 'number') {
-            errors.push(err('INVALID_FIELD', `payload.cells[${i}].value must be a string, number or null (UNKNOWN)`));
+            errors.push(
+              err('INVALID_FIELD', `payload.cells[${i}].value must be a string, number or null (UNKNOWN)`),
+            );
             continue;
           }
           if (typeof value === 'number' && !Number.isFinite(value)) {
@@ -662,7 +685,9 @@ function validatePayload(
       }
       const evidenceEventIds = optionalStringArray(raw, 'evidenceEventIds', errors);
       if (targetEventId === undefined && targetClaimText === undefined) {
-        warnings.push(warn('VERIFY_TARGET_UNSPECIFIED', 'verify record has no target event id or claim text'));
+        warnings.push(
+          warn('VERIFY_TARGET_UNSPECIFIED', 'verify record has no target event id or claim text'),
+        );
       }
       if (evidenceEventIds === undefined || evidenceEventIds.length === 0) {
         warnings.push(warn('VERIFY_WITHOUT_EVIDENCE', 'verify record lists no evidence events'));
@@ -691,13 +716,20 @@ function validatePayload(
 
 function payloadFields(type: DomainEventType): Set<string> {
   switch (type) {
-    case 'SEARCH': return new Set(['type', 'query', 'results']);
-    case 'READ': return new Set(['type', 'sourceId', 'outcome', 'summary']);
-    case 'CLAIM': return new Set(['type', 'text', 'sourceId', 'anchor']);
-    case 'COMPARE': return new Set(['type', 'candidates', 'criteria', 'cells']);
-    case 'HYPOTHESIS': return new Set(['type', 'text', 'basis', 'basedOnEventIds']);
-    case 'CONTRADICTION': return new Set(['type', 'description', 'conflictingEventIds', 'conditions']);
-    case 'VERIFY': return new Set(['type', 'targetEventId', 'targetClaimText', 'method', 'result', 'evidenceEventIds']);
+    case 'SEARCH':
+      return new Set(['type', 'query', 'results']);
+    case 'READ':
+      return new Set(['type', 'sourceId', 'outcome', 'summary']);
+    case 'CLAIM':
+      return new Set(['type', 'text', 'sourceId', 'anchor']);
+    case 'COMPARE':
+      return new Set(['type', 'candidates', 'criteria', 'cells']);
+    case 'HYPOTHESIS':
+      return new Set(['type', 'text', 'basis', 'basedOnEventIds']);
+    case 'CONTRADICTION':
+      return new Set(['type', 'description', 'conflictingEventIds', 'conditions']);
+    case 'VERIFY':
+      return new Set(['type', 'targetEventId', 'targetClaimText', 'method', 'result', 'evidenceEventIds']);
     case 'RECOMMEND':
       return new Set(['type', 'choice', 'alternatives', 'userConditions', 'rationale', 'rationaleEventIds']);
   }
@@ -708,13 +740,33 @@ function payloadFields(type: DomainEventType): Set<string> {
 /* ------------------------------------------------------------------ */
 
 const KNOWN_EVENT_FIELDS = new Set([
-  'recordKind', 'schemaVersion', 'eventId', 'runId', 'type', 'occurredAt',
-  'sequence', 'receivedAt', 'adapterId', 'adapterVersion', 'origin', 'source',
-  'provenance', 'payload', 'relations',
+  'recordKind',
+  'schemaVersion',
+  'eventId',
+  'runId',
+  'type',
+  'occurredAt',
+  'sequence',
+  'receivedAt',
+  'adapterId',
+  'adapterVersion',
+  'origin',
+  'source',
+  'provenance',
+  'payload',
+  'relations',
 ]);
 const KNOWN_RUN_FIELDS = new Set([
-  'recordKind', 'schemaVersion', 'runId', 'lifecycle', 'occurredAt',
-  'sequence', 'receivedAt', 'adapterId', 'adapterVersion', 'detail',
+  'recordKind',
+  'schemaVersion',
+  'runId',
+  'lifecycle',
+  'occurredAt',
+  'sequence',
+  'receivedAt',
+  'adapterId',
+  'adapterVersion',
+  'detail',
 ]);
 
 export function validateRecord(rawInput: unknown): ValidationOutcome {
@@ -725,14 +777,24 @@ export function validateRecord(rawInput: unknown): ValidationOutcome {
   const unknownFields: string[] = [];
 
   if (!isPlainObject(raw)) {
-    return { ok: false, errors: [err('INVALID_RECORD', 'record must be a JSON object')], warnings, redactedFields };
+    return {
+      ok: false,
+      errors: [err('INVALID_RECORD', 'record must be a JSON object')],
+      warnings,
+      redactedFields,
+    };
   }
 
   const schemaVersion = raw['schemaVersion'];
   if (typeof schemaVersion !== 'number' || !Number.isInteger(schemaVersion)) {
     errors.push(err('INVALID_SCHEMA_VERSION', 'schemaVersion must be an integer'));
   } else if (schemaVersion > SCHEMA_VERSION) {
-    errors.push(err('FUTURE_SCHEMA_VERSION', `schemaVersion ${schemaVersion} is newer than supported ${SCHEMA_VERSION}`));
+    errors.push(
+      err(
+        'FUTURE_SCHEMA_VERSION',
+        `schemaVersion ${schemaVersion} is newer than supported ${SCHEMA_VERSION}`,
+      ),
+    );
   } else if (schemaVersion !== SCHEMA_VERSION) {
     errors.push(err('UNSUPPORTED_SCHEMA_VERSION', `schemaVersion must be ${SCHEMA_VERSION}`));
   }
@@ -771,9 +833,15 @@ export function validateRecord(rawInput: unknown): ValidationOutcome {
       errors.push(err('MISSING_FIELD', 'payload is required'));
     }
     if (
-      eventId !== undefined && runId !== undefined && occurredAt !== undefined &&
-      adapterId !== undefined && adapterVersion !== undefined && origin !== undefined &&
-      source !== undefined && provenance !== undefined && payload !== undefined &&
+      eventId !== undefined &&
+      runId !== undefined &&
+      occurredAt !== undefined &&
+      adapterId !== undefined &&
+      adapterVersion !== undefined &&
+      origin !== undefined &&
+      source !== undefined &&
+      provenance !== undefined &&
+      payload !== undefined &&
       DOMAIN_EVENT_TYPES.includes(type as never)
     ) {
       const event: ViewTraceEvent = {
@@ -795,6 +863,15 @@ export function validateRecord(rawInput: unknown): ValidationOutcome {
       };
       record = event;
     }
+  } else if (recordKind === 'answer') {
+    record = validateAnswer(raw, errors, unknownFields, {
+      runId,
+      occurredAt,
+      receivedAt,
+      sequence,
+      adapterId,
+      adapterVersion,
+    });
   } else {
     for (const key of Object.keys(raw)) {
       if (!KNOWN_RUN_FIELDS.has(key)) unknownFields.push(key);
@@ -805,8 +882,11 @@ export function validateRecord(rawInput: unknown): ValidationOutcome {
     }
     const detail = optionalString(raw, 'detail', errors);
     if (
-      runId !== undefined && occurredAt !== undefined && adapterId !== undefined &&
-      adapterVersion !== undefined && RUN_LIFECYCLES.includes(lifecycle as never)
+      runId !== undefined &&
+      occurredAt !== undefined &&
+      adapterId !== undefined &&
+      adapterVersion !== undefined &&
+      RUN_LIFECYCLES.includes(lifecycle as never)
     ) {
       record = {
         recordKind: 'run',
@@ -842,12 +922,18 @@ function finish(
 ): ValidationOutcome {
   if (unknownFields.length > 0) {
     warnings.push(
-      info('UNKNOWN_FIELD_DROPPED', `dropped unknown fields: ${[...new Set(unknownFields)].sort().join(', ')}`),
+      info(
+        'UNKNOWN_FIELD_DROPPED',
+        `dropped unknown fields: ${[...new Set(unknownFields)].sort().join(', ')}`,
+      ),
     );
   }
   if (redactedFields.length > 0) {
     warnings.push(
-      info('REDACTED_PRIVATE_FIELD', `removed ${redactedFields.length} private-reasoning field(s): ${redactedFields.join(', ')}`),
+      info(
+        'REDACTED_PRIVATE_FIELD',
+        `removed ${redactedFields.length} private-reasoning field(s): ${redactedFields.join(', ')}`,
+      ),
     );
   }
   if (errors.length > 0 || record === undefined) {
@@ -855,4 +941,114 @@ function finish(
     return { ok: false, errors, warnings, redactedFields };
   }
   return { ok: true, record, warnings, redactedFields };
+}
+
+function validateAnswer(
+  raw: Record<string, unknown>,
+  errors: Diagnostic[],
+  unknown: string[],
+  envelope: {
+    runId?: string;
+    occurredAt?: string;
+    receivedAt?: string;
+    sequence?: number;
+    adapterId?: string;
+    adapterVersion?: string;
+  },
+): TraceRecord | undefined {
+  const known = new Set([
+    'recordKind',
+    'schemaVersion',
+    'receiptVersion',
+    'receiptId',
+    'runId',
+    'agentId',
+    'agentSessionId',
+    'turnId',
+    'answerId',
+    'answer',
+    'answerHash',
+    'hashVersion',
+    'final',
+    'timestamp',
+    'occurredAt',
+    'receivedAt',
+    'sequence',
+    'adapterId',
+    'adapterVersion',
+    'questionSummary',
+    'eventIds',
+    'sharedEventIds',
+  ]);
+  for (const key of Object.keys(raw)) if (!known.has(key)) unknown.push(key);
+  const receiptId = validateEventIdField(raw, 'receiptId', 'receiptId', errors);
+  const answerId = validateEventIdField(raw, 'answerId', 'answerId', errors);
+  const agentId = validateEventIdField(raw, 'agentId', 'agentId', errors);
+  const identity = (key: string): string | undefined =>
+    raw[key] === undefined ? undefined : validateEventIdField(raw, key, key, errors);
+  const agentSessionId = identity('agentSessionId');
+  const turnId = identity('turnId');
+  const answer = requireString(raw, 'answer', 'answer', errors);
+  const timestamp = validateTimestampField(raw, 'timestamp', errors, true);
+  const questionSummary = optionalString(raw, 'questionSummary', errors);
+  if (questionSummary !== undefined && questionSummary.length > 500)
+    errors.push(err('INVALID_FIELD', 'questionSummary exceeds 500 characters'));
+  if (raw['receiptVersion'] !== 1) errors.push(err('INVALID_RECEIPT_VERSION', 'receiptVersion must be 1'));
+  if (raw['final'] !== true)
+    errors.push(err('ANSWER_NOT_FINAL', 'only finalized public answers are accepted'));
+  if (raw['hashVersion'] !== undefined && raw['hashVersion'] !== ANSWER_HASH_VERSION)
+    errors.push(err('INVALID_HASH_VERSION', 'unsupported answer hash policy'));
+  const ids = (key: string): readonly string[] | undefined => {
+    const values = optionalStringArray(raw, key, errors);
+    if (
+      values !== undefined &&
+      (values.length > 10000 || !values.every(isValidEventId) || new Set(values).size !== values.length)
+    )
+      errors.push(err('INVALID_SCOPE', 'scope ids must be unique same-run event ids, at most 10000'));
+    return values;
+  };
+  const eventIds = ids('eventIds');
+  const sharedEventIds = ids('sharedEventIds');
+  const own = new Set(eventIds);
+  if (sharedEventIds?.some((id) => own.has(id)))
+    errors.push(err('INVALID_SCOPE', 'own and shared scopes must be disjoint'));
+  const hash = answer === undefined ? '' : answerHash(answer);
+  if (raw['answerHash'] !== undefined && raw['answerHash'] !== hash)
+    errors.push(err('ANSWER_HASH_MISMATCH', 'answer hash disagrees with sanitized finalized answer'));
+  if (
+    !receiptId ||
+    !answerId ||
+    !agentId ||
+    answer === undefined ||
+    !timestamp ||
+    !envelope.runId ||
+    !envelope.occurredAt ||
+    !envelope.adapterId ||
+    !envelope.adapterVersion
+  )
+    return undefined;
+  return {
+    recordKind: 'answer',
+    schemaVersion: SCHEMA_VERSION,
+    receiptVersion: 1,
+    receiptId,
+    answerId,
+    agentId,
+    agentSessionId,
+    turnId,
+    answer: normalizedAnswer(answer),
+    answerHash: hash,
+    hashVersion: ANSWER_HASH_VERSION,
+    final: true,
+    timestamp,
+    questionSummary,
+    eventIds,
+    sharedEventIds,
+    runId: envelope.runId,
+    occurredAt: envelope.occurredAt,
+    adapterId: envelope.adapterId,
+    adapterVersion: envelope.adapterVersion,
+    receivedAt: envelope.receivedAt ?? '',
+    sequence: envelope.sequence ?? -1,
+  };
 }

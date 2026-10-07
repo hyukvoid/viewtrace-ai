@@ -1,0 +1,27 @@
+{
+  "runId": "receipt-multi",
+  "lifecycle": "COMPLETED",
+  "completeness": "COMPLETE",
+  "eventCount": 4,
+  "recordCount": 9,
+  "answers": {
+    "A1": [
+      "shared",
+      "e1"
+    ],
+    "A2": [
+      "shared",
+      "e2"
+    ],
+    "A3": [
+      "shared",
+      "e3"
+    ]
+  },
+  "forbiddenConclusions": [
+    "hash alone is exact",
+    "latest identifies current answer",
+    "AGENT_REPORTED is verified",
+    "UNKNOWN evidence means strongly supported"
+  ]
+}

@@ -23,6 +23,9 @@ export interface AdapterCapability {
   readonly provenance: SupportLevel;
   readonly liveIngest: SupportLevel;
   readonly completion: SupportLevel;
+  readonly finalAnswerCapture: SupportLevel;
+  readonly sessionTurnIdentity: SupportLevel;
+  readonly exactAssociation: SupportLevel;
   readonly limitations: readonly string[];
 }
 
@@ -41,15 +44,18 @@ export const ADAPTER_CAPABILITIES: readonly AdapterCapability[] = [
   {
     adapterId: REFERENCE_ADAPTER_ID,
     label: 'ViewTrace reference JSONL',
-    version: '1.1.0',
+    version: '1.2.0',
     status: 'REFERENCE',
     events: ALL_YES,
     sourceAnchor: 'YES',
     provenance: 'YES',
     liveIngest: 'YES',
     completion: 'YES',
+    finalAnswerCapture: 'YES',
+    sessionTurnIdentity: 'PARTIAL',
+    exactAssociation: 'PARTIAL',
     limitations: [
-      'Live collection via `viewtrace run -- <producer>` (M1); report server is M2 scope',
+      'Final public answers and explicit event scopes supported in v1.2; absent session/turn/scope remains UNKNOWN and uses picker',
       'Reference format for contract verification, not a real agent adapter',
       'Provenance labels are preserved as claimed; ViewTrace never verifies or promotes them',
     ],
@@ -64,6 +70,9 @@ export const ADAPTER_CAPABILITIES: readonly AdapterCapability[] = [
     provenance: 'UNKNOWN',
     liveIngest: 'NO',
     completion: 'UNKNOWN',
+    finalAnswerCapture: 'UNKNOWN',
+    sessionTurnIdentity: 'UNKNOWN',
+    exactAssociation: 'UNKNOWN',
     limitations: [
       'Not implemented; research mapping is M5 scope',
       'Existing coding-log support in agent-pigeon is not research-support evidence',
@@ -79,6 +88,9 @@ export const ADAPTER_CAPABILITIES: readonly AdapterCapability[] = [
     provenance: 'UNKNOWN',
     liveIngest: 'NO',
     completion: 'UNKNOWN',
+    finalAnswerCapture: 'UNKNOWN',
+    sessionTurnIdentity: 'UNKNOWN',
+    exactAssociation: 'UNKNOWN',
     limitations: [
       'Not implemented; research mapping is M5 scope',
       'Existing coding-log support in agent-pigeon is not research-support evidence',

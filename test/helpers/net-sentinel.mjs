@@ -102,11 +102,15 @@ guard('net', () => {
 });
 
 guard('dns', () => {
-  dns.lookup = function patchedLookup(hostname) {
+  const originalLookup = dns.lookup;
+  dns.lookup = function patchedLookup(hostname, ...args) {
     record('dns.lookup', hostname);
+    return originalLookup.call(dns, hostname, ...args);
   };
-  dns.resolve = function patchedResolve(hostname) {
+  const originalResolve = dns.resolve;
+  dns.resolve = function patchedResolve(hostname, ...args) {
     record('dns.resolve', hostname);
+    return originalResolve.call(dns, hostname, ...args);
   };
 });
 

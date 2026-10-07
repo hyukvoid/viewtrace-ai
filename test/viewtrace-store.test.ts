@@ -1,7 +1,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { chmod, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -384,15 +384,15 @@ describe('viewtrace store: fault resistance', () => {
   });
 
   it('surfaces ENOSPC on the derived JSONL and repairs it on reopen', async () => {
-    if (process.platform === 'win32') return; // /dev/full is POSIX-only
     const root = await tempDataRoot('enospc');
-    const store = await openStore(root);
+    // M2 refuses symlinks (including /dev/full); inject a write-boundary ENOSPC
+    // while retaining the real committed SQLite/reopen/JSONL repair assertions.
+    const store = await ViewTraceStore.open({ dataRoot: root, now: FIXED_NOW, injectFault: point => point === 'mid-jsonl-write' ? Object.assign(new Error('ENOSPC: no space left'), {code:'ENOSPC'}) : undefined });
     await store.createRun('run-enospc', { adapterId: 'a', adapterVersion: '1' });
     const runDir = join(root, 'runs', 'run-enospc');
     const { mkdir } = await import('node:fs/promises');
     await mkdir(runDir, { recursive: true });
     await rm(join(runDir, 'trace.jsonl'), { force: true });
-    await symlink('/dev/full', join(runDir, 'trace.jsonl'));
     const result = await store.appendRecords('run-enospc', threeEvents('run-enospc'));
     assert.ok(result.jsonlWriteError !== undefined, 'ENOSPC must not be swallowed');
     assert.ok(/no space|ENOSPC/i.test(result.jsonlWriteError.message));

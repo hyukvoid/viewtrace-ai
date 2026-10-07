@@ -27,6 +27,8 @@ import { chmod, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalize, contentHash } from './canonical.js';
+import { assertLocalPath } from './paths.js';
+import type { AnswerReceipt } from './answer.js';
 import { isValidRunId } from './validate.js';
 import type {
   CollectionCompleteness,
@@ -43,12 +45,10 @@ import type {
 } from './types.js';
 import { RUN_TRANSITIONS } from './types.js';
 
-export const DB_SCHEMA_VERSION = 1;
+export const DB_SCHEMA_VERSION = 2;
 
 export type FaultPoint =
-  | 'before-db-commit'
-  | 'after-db-commit-before-jsonl'
-  | 'mid-jsonl-write';
+  'before-db-commit' | 'after-db-commit-before-jsonl' | 'mid-jsonl-write' | 'after-delete-commit';
 
 export interface StoreOptions {
   readonly dataRoot: string;
@@ -154,6 +154,27 @@ CREATE TABLE IF NOT EXISTS diagnostics (
 );
 `;
 
+const V2_DDL = `
+CREATE TABLE answers (
+  receipt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, answer_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL, session_id TEXT, turn_id TEXT, answer_hash TEXT NOT NULL,
+  timestamp TEXT NOT NULL, UNIQUE(run_id, answer_id)
+);
+CREATE INDEX answers_by_turn ON answers(agent_id, session_id, turn_id);
+CREATE INDEX answers_by_run ON answers(run_id);
+CREATE INDEX answers_by_time ON answers(timestamp DESC, receipt_id);
+CREATE TABLE answer_events (
+  receipt_id TEXT NOT NULL, event_id TEXT NOT NULL, scope TEXT NOT NULL,
+  PRIMARY KEY(receipt_id, event_id)
+);
+CREATE INDEX answer_events_by_event ON answer_events(event_id,scope,receipt_id);
+CREATE TABLE selections (
+  selection_id INTEGER PRIMARY KEY, receipt_id TEXT, run_id TEXT NOT NULL, selected_at TEXT NOT NULL
+);
+CREATE TABLE retention (run_id TEXT PRIMARY KEY, keep INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE deleted_runs (run_id TEXT PRIMARY KEY);
+`;
+
 interface Migration {
   from: number;
   to: number;
@@ -165,6 +186,22 @@ interface Migration {
  * only ever produced by development databases — no released v0 exists.
  */
 const MIGRATIONS: readonly Migration[] = [
+  {
+    from: 1,
+    to: 2,
+    apply: (db) => {
+      db.exec(`ALTER TABLE records RENAME TO records_v1;
+      DROP INDEX records_by_sequence;
+      CREATE TABLE records (
+        run_id TEXT NOT NULL, record_kind TEXT NOT NULL CHECK(record_kind IN ('event','run','answer')),
+        record_id TEXT NOT NULL, sequence INTEGER NOT NULL, payload_hash TEXT NOT NULL, canonical TEXT NOT NULL,
+        PRIMARY KEY(run_id,record_kind,record_id));
+      INSERT INTO records SELECT * FROM records_v1;
+      DROP TABLE records_v1;
+      CREATE UNIQUE INDEX records_by_sequence ON records(run_id,sequence);`);
+      db.exec(V2_DDL);
+    },
+  },
   {
     from: 0,
     to: 1,
@@ -204,9 +241,8 @@ const MIGRATIONS: readonly Migration[] = [
 ];
 
 function hasTable(db: DatabaseSync, name: string): boolean {
-  const row = db
-    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")
-    .get(name) as { name: string } | undefined;
+  const row = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) as
+    { name: string } | undefined;
   return row !== undefined;
 }
 
@@ -238,6 +274,9 @@ export class ViewTraceStore {
   private static async openInternal(options: StoreOptions): Promise<ViewTraceStore | null> {
     const store = new ViewTraceStore(options.dataRoot, options);
     const dbPath = join(options.dataRoot, 'viewtrace.db');
+    await assertLocalPath(options.dataRoot, dbPath);
+    for (const name of ['viewtrace.db-wal', 'viewtrace.db-shm', 'viewtrace.db-journal'])
+      await assertLocalPath(options.dataRoot, join(options.dataRoot, name));
 
     if (options.readonly === true) {
       if (!existsSync(dbPath)) return null;
@@ -273,6 +312,7 @@ export class ViewTraceStore {
     await chmodIfPosix(options.dataRoot, 0o700);
     for (const dir of ['runs', 'evidence', 'artifacts']) {
       const p = join(options.dataRoot, dir);
+      await assertLocalPath(options.dataRoot, p);
       await mkdir(p, { recursive: true, mode: 0o700 });
       await chmodIfPosix(p, 0o700);
     }
@@ -286,12 +326,13 @@ export class ViewTraceStore {
         db.exec('BEGIN IMMEDIATE');
         try {
           db.exec(V1_DDL);
-          setVersion(db, DB_SCHEMA_VERSION);
+          setVersion(db, 1);
           db.exec('COMMIT');
         } catch (e) {
           db.exec('ROLLBACK');
           throw e;
         }
+        migrate(db, 1);
       } else {
         const version = readVersion(db);
         if (version > DB_SCHEMA_VERSION) {
@@ -314,6 +355,7 @@ export class ViewTraceStore {
     }
     await chmodIfPosix(dbPath, 0o600);
     store.db = db;
+    await store.recoverDeletions();
     await store.recover();
     return store;
   }
@@ -332,7 +374,10 @@ export class ViewTraceStore {
 
   private assertWritable(): void {
     if (this.options.readonly === true) {
-      throw new StoreError('STORE_READ_ONLY', 'store is open read-only; writes require the collector service');
+      throw new StoreError(
+        'STORE_READ_ONLY',
+        'store is open read-only; writes require the collector service',
+      );
     }
   }
 
@@ -351,13 +396,12 @@ export class ViewTraceStore {
   /* Runs                                                              */
   /* ---------------------------------------------------------------- */
 
-  async createRun(
-    runId: string,
-    info: { adapterId: string; adapterVersion: string },
-  ): Promise<RunState> {
+  async createRun(runId: string, info: { adapterId: string; adapterVersion: string }): Promise<RunState> {
     this.assertWritable();
     const db = this.requireDb();
     this.runDir(runId); // validate before any path use
+    if (db.prepare('SELECT 1 FROM deleted_runs WHERE run_id = ?').get(runId))
+      throw new StoreError('UNKNOWN_RUN', 'deleted run id cannot be reused');
     const now = this.now();
     try {
       db.prepare(
@@ -376,9 +420,7 @@ export class ViewTraceStore {
 
   getRun(runId: string): RunState | null {
     const db = this.requireDb();
-    const row = db
-      .prepare('SELECT * FROM runs WHERE run_id = ?')
-      .get(runId) as unknown as RunRow | undefined;
+    const row = db.prepare('SELECT * FROM runs WHERE run_id = ?').get(runId) as unknown as RunRow | undefined;
     if (row === undefined) return null;
     return rowToState(db, row);
   }
@@ -465,21 +507,27 @@ export class ViewTraceStore {
         // excluded) — that is what duplicate detection compares.
         const content = contentHash(record);
         const recordId =
-          record.recordKind === 'event' ? record.eventId : `run@${record.sequence}`;
+          record.recordKind === 'event'
+            ? record.eventId
+            : record.recordKind === 'answer'
+              ? record.receiptId
+              : `run@${record.sequence}`;
 
         const existing = db
-          .prepare('SELECT sequence, payload_hash, canonical FROM records WHERE run_id = ? AND record_kind = ? AND record_id = ?')
+          .prepare(
+            'SELECT sequence, payload_hash, canonical FROM records WHERE run_id = ? AND record_kind = ? AND record_id = ?',
+          )
           .get(runId, record.recordKind, recordId) as
-          | { sequence: number; payload_hash: string; canonical: string }
-          | undefined;
+          { sequence: number; payload_hash: string; canonical: string } | undefined;
         if (existing !== undefined) {
           let existingHash = existing.payload_hash;
           if (existingHash === '') {
             // Row migrated from the experimental v0 layout: backfill its hash
             // from the stored canonical form so future receipts compare properly.
             existingHash = contentHash(JSON.parse(existing.canonical) as TraceRecord);
-            db.prepare('UPDATE records SET payload_hash = ? WHERE run_id = ? AND record_kind = ? AND record_id = ?')
-              .run(existingHash, runId, record.recordKind, recordId);
+            db.prepare(
+              'UPDATE records SET payload_hash = ? WHERE run_id = ? AND record_kind = ? AND record_id = ?',
+            ).run(existingHash, runId, record.recordKind, recordId);
           }
           const duplicateKind = existingHash === content ? 'IDEMPOTENT' : 'CONFLICTING';
           insertDuplicate.run(
@@ -503,13 +551,41 @@ export class ViewTraceStore {
           if (duplicateKind === 'CONFLICTING') {
             batchDiagnostics.push({
               code: 'DUPLICATE_CONFLICTING',
-              severity: 'warning',
+              severity: record.recordKind === 'answer' ? 'error' : 'warning',
               message: `record id received again with a different payload; original kept, duplicate isolated`,
               eventId: record.recordKind === 'event' ? record.eventId : undefined,
               runId,
             });
           }
           continue;
+        }
+
+        if (record.recordKind === 'answer') {
+          const conflict = db
+            .prepare('SELECT 1 FROM answers WHERE receipt_id = ? OR (run_id = ? AND answer_id = ?)')
+            .get(record.receiptId, runId, record.answerId);
+          if (conflict) {
+            batchDiagnostics.push({
+              code: 'RECEIPT_ID_CONFLICT',
+              severity: 'error',
+              message: 'receipt or answer identity already belongs to another record',
+              runId,
+            });
+            continue;
+          }
+          db.prepare('INSERT INTO answers VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(
+            record.receiptId,
+            runId,
+            record.answerId,
+            record.agentId,
+            record.agentSessionId ?? null,
+            record.turnId ?? null,
+            record.answerHash,
+            new Date(record.timestamp).toISOString(),
+          );
+          const link = db.prepare('INSERT INTO answer_events VALUES (?, ?, ?)');
+          for (const id of record.eventIds ?? []) link.run(record.receiptId, id, 'own');
+          for (const id of record.sharedEventIds ?? []) link.run(record.receiptId, id, 'shared');
         }
 
         if (record.recordKind === 'run') {
@@ -525,7 +601,12 @@ export class ViewTraceStore {
             lifecycle = record.lifecycle;
             history = [
               ...history,
-              { lifecycle: record.lifecycle, at: record.occurredAt, sequence: record.sequence, observed: true },
+              {
+                lifecycle: record.lifecycle,
+                at: record.occurredAt,
+                sequence: record.sequence,
+                observed: true,
+              },
             ];
           }
         }
@@ -594,6 +675,7 @@ export class ViewTraceStore {
     const dir = this.runDir(runId);
     let handle = null as Awaited<ReturnType<typeof open>> | null;
     try {
+      await assertLocalPath(this.dataRoot, this.tracePath(runId));
       await mkdir(dir, { recursive: true, mode: 0o700 });
       handle = await open(this.tracePath(runId), 'a');
       await chmodIfPosix(this.tracePath(runId), 0o600);
@@ -642,6 +724,7 @@ export class ViewTraceStore {
       let needsRewrite = false;
       // Only regular files are readable safely: a device/fifo at the trace
       // path (fault injection or sabotage) must be replaced, not streamed.
+      await assertLocalPath(this.dataRoot, path);
       const info = await stat(path).catch(() => null);
       if (info !== null && !info.isFile()) {
         needsRewrite = true;
@@ -661,7 +744,8 @@ export class ViewTraceStore {
       ).map((r) => r.canonical + '\n');
       await mkdir(this.runDir(row.run_id), { recursive: true, mode: 0o700 });
       const tmp = this.tracePath(row.run_id) + '.repair.tmp';
-      const handle = await open(tmp, 'w');
+      await assertLocalPath(this.dataRoot, tmp);
+      const handle = await open(tmp, 'w', 0o600);
       try {
         for (const line of canonicalLines) await handle.write(line);
         await handle.sync();
@@ -713,7 +797,9 @@ export class ViewTraceStore {
   listDiagnostics(runId: string): Diagnostic[] {
     const db = this.requireDb();
     const rows = db
-      .prepare('SELECT code, severity, message, line_index, byte_offset, event_id FROM diagnostics WHERE run_id = ? ORDER BY seq')
+      .prepare(
+        'SELECT code, severity, message, line_index, byte_offset, event_id FROM diagnostics WHERE run_id = ? ORDER BY seq',
+      )
       .all(runId) as Array<{
       code: string;
       severity: string;
@@ -768,8 +854,254 @@ export class ViewTraceStore {
     };
   }
 
+  // M2 queries are bounded in SQL; revision is the complete canonical public response hash.
+  pageRecords(
+    runId: string,
+    after: number,
+    limit: number,
+    receiptId?: string,
+  ): { records: TraceRecord[]; nextCursor: number | null } {
+    const sql =
+      receiptId === undefined
+        ? "SELECT canonical FROM records WHERE run_id = ? AND record_kind = 'event' AND sequence > ? ORDER BY sequence LIMIT ?"
+        : "SELECT r.canonical FROM records r JOIN answer_events e ON e.event_id = r.record_id WHERE r.run_id = ? AND r.record_kind = 'event' AND r.sequence > ? AND e.receipt_id = ? ORDER BY r.sequence LIMIT ?";
+    const stmt = this.requireDb().prepare(sql);
+    const rows =
+      receiptId === undefined
+        ? stmt.iterate(runId, after, limit + 1)
+        : stmt.iterate(runId, after, receiptId, limit + 1);
+    const records: TraceRecord[] = [];
+    let bytes = 0,
+      more = false;
+    for (const row of rows) {
+      const canonical = row['canonical'] as string;
+      const size = Buffer.byteLength(canonical, 'utf8');
+      if (records.length >= limit || (records.length > 0 && bytes + size > 1024 * 1024)) {
+        more = true;
+        break;
+      }
+      bytes += size;
+      records.push(JSON.parse(canonical) as TraceRecord);
+    }
+    return { records, nextCursor: more ? (records.at(-1)?.sequence ?? null) : null };
+  }
+
+  pageDiagnostics(runId: string, limit = 100): Diagnostic[] {
+    const rows = this.requireDb()
+      .prepare(
+        'SELECT code,severity,message,line_index,byte_offset,event_id FROM diagnostics WHERE run_id = ? ORDER BY seq DESC LIMIT ?',
+      )
+      .all(runId, limit) as {
+      code: string;
+      severity: Diagnostic['severity'];
+      message: string;
+      line_index: number | null;
+      byte_offset: number | null;
+      event_id: string | null;
+    }[];
+    return rows.map((row) => ({
+      code: row.code,
+      severity: row.severity,
+      message: row.message,
+      lineIndex: row.line_index ?? undefined,
+      byteOffset: row.byte_offset ?? undefined,
+      eventId: row.event_id ?? undefined,
+      runId,
+    }));
+  }
+
+  countDiagnostics(runId: string): number {
+    return (
+      this.requireDb().prepare('SELECT COUNT(*) AS n FROM diagnostics WHERE run_id = ?').get(runId) as {
+        n: number;
+      }
+    ).n;
+  }
+
+  recentRuns(limit = 50, offset = 0): RunState[] {
+    return (
+      this.requireDb()
+        .prepare('SELECT * FROM runs ORDER BY updated_at DESC,run_id LIMIT ? OFFSET ?')
+        .all(limit, offset) as unknown as RunRow[]
+    ).map((row) => rowToState(this.requireDb(), row));
+  }
+
+  recentAnswers(limit = 50, offset = 0): AnswerReceipt[] {
+    return this.answerRows('ORDER BY a.timestamp DESC,a.receipt_id LIMIT ? OFFSET ?', [limit, offset]);
+  }
+
+  private answerRows(suffix: string, params: (string | number)[]): AnswerReceipt[] {
+    return (
+      this.requireDb()
+        .prepare(
+          "SELECT r.canonical FROM answers a JOIN records r ON r.run_id=a.run_id AND r.record_kind='answer' AND r.record_id=a.receipt_id " +
+            suffix,
+        )
+        .all(...params) as { canonical: string }[]
+    ).map((row) => JSON.parse(row.canonical) as AnswerReceipt);
+  }
+
+  receiptConflicted(receipt: AnswerReceipt): boolean {
+    return !!this.requireDb()
+      .prepare(
+        "SELECT 1 FROM duplicates WHERE run_id=? AND record_kind='answer' AND record_id=? AND kind='CONFLICTING' LIMIT 1",
+      )
+      .get(receipt.runId, receipt.receiptId);
+  }
+  getReceipt(id: string): AnswerReceipt | null {
+    return this.answerRows('WHERE a.receipt_id = ?', [id])[0] ?? null;
+  }
+  getAnswer(runId: string, answerId: string): AnswerReceipt | null {
+    return this.answerRows('WHERE a.run_id = ? AND a.answer_id = ?', [runId, answerId])[0] ?? null;
+  }
+  turnAnswers(agentId: string, session: string, turn: string): AnswerReceipt[] {
+    return this.answerRows('WHERE a.agent_id = ? AND a.session_id = ? AND a.turn_id = ? LIMIT 2', [
+      agentId,
+      session,
+      turn,
+    ]);
+  }
+
+  answerScope(receipt: AnswerReceipt): {
+    status: 'EXPLICIT' | 'UNKNOWN';
+    missing: string[];
+    missingCount: number;
+    conflicts: number;
+    eventCount: number;
+  } {
+    const db = this.requireDb();
+    const missing = (
+      db
+        .prepare(
+          "SELECT e.event_id FROM answer_events e LEFT JOIN records r ON r.run_id=? AND r.record_kind='event' AND r.record_id=e.event_id WHERE e.receipt_id=? AND r.record_id IS NULL LIMIT 100",
+        )
+        .all(receipt.runId, receipt.receiptId) as { event_id: string }[]
+    ).map((row) => row.event_id);
+    const missingCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM answer_events e LEFT JOIN records r ON r.run_id=? AND r.record_kind='event' AND r.record_id=e.event_id WHERE e.receipt_id=? AND r.record_id IS NULL",
+        )
+        .get(receipt.runId, receipt.receiptId) as { n: number }
+    ).n;
+    const conflicts = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM answer_events e JOIN answer_events other ON other.event_id=e.event_id AND other.scope='own' AND other.receipt_id<>e.receipt_id JOIN answers a ON a.receipt_id=other.receipt_id AND a.run_id=? WHERE e.receipt_id=? AND e.scope='own'",
+        )
+        .get(receipt.runId, receipt.receiptId) as { n: number }
+    ).n;
+    const eventCount = (
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM answer_events e JOIN records r ON r.run_id=? AND r.record_kind='event' AND r.record_id=e.event_id WHERE e.receipt_id=?",
+        )
+        .get(receipt.runId, receipt.receiptId) as { n: number }
+    ).n;
+    return {
+      status: receipt.eventIds === undefined || missing.length > 0 || conflicts > 0 ? 'UNKNOWN' : 'EXPLICIT',
+      missing,
+      missingCount,
+      conflicts,
+      eventCount,
+    };
+  }
+
+  hasSelection(id: number, receiptId: string, runId: string): boolean {
+    return !!this.requireDb()
+      .prepare('SELECT 1 FROM selections WHERE selection_id=? AND receipt_id=? AND run_id=?')
+      .get(id, receiptId, runId);
+  }
+
+  select(receiptId: string | undefined, runId: string): number {
+    this.assertWritable();
+    if (!this.getRun(runId) || (receiptId && this.getReceipt(receiptId)?.runId !== runId))
+      throw new StoreError('UNKNOWN_RUN', 'selection target missing');
+    return Number(
+      this.requireDb()
+        .prepare('INSERT INTO selections(receipt_id,run_id,selected_at) VALUES (?,?,?)')
+        .run(receiptId ?? null, runId, this.now()).lastInsertRowid,
+    );
+  }
+
+  setKeep(runId: string, keep: boolean): void {
+    this.assertWritable();
+    if (!this.getRun(runId)) throw new StoreError('UNKNOWN_RUN', 'unknown retention target');
+    this.requireDb()
+      .prepare('INSERT OR REPLACE INTO retention VALUES (?,?)')
+      .run(runId, keep ? 1 : 0);
+  }
+  isKept(runId: string): boolean {
+    return (
+      (
+        this.requireDb().prepare('SELECT keep FROM retention WHERE run_id=?').get(runId) as
+          { keep: number } | undefined
+      )?.keep === 1
+    );
+  }
+
+  /** DB tombstone commits first. Reopen finishes filesystem erasure without restoring receipts. */
+  async deleteRun(runId: string): Promise<void> {
+    this.assertWritable();
+    const db = this.requireDb();
+    const run = this.getRun(runId);
+    if (!run) throw new StoreError('UNKNOWN_RUN', 'unknown delete target');
+    if (run.lifecycle === 'RUNNING' || run.lifecycle === 'CREATED')
+      throw new StoreError('DB_ERROR', 'active run cannot be deleted');
+    for (const area of ['runs', 'live', 'artifacts', 'evidence'])
+      await assertLocalPath(this.dataRoot, join(this.dataRoot, area, runId));
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      db.prepare(
+        'DELETE FROM answer_events WHERE receipt_id IN (SELECT receipt_id FROM answers WHERE run_id=?)',
+      ).run(runId);
+      for (const table of [
+        'answers',
+        'selections',
+        'retention',
+        'records',
+        'duplicates',
+        'diagnostics',
+        'runs',
+      ])
+        db.prepare(`DELETE FROM ${table} WHERE run_id=?`).run(runId);
+      db.prepare('INSERT OR IGNORE INTO deleted_runs VALUES (?)').run(runId);
+      db.exec('COMMIT');
+    } catch (e) {
+      db.exec('ROLLBACK');
+      throw wrapDbError(e);
+    }
+    const fault = this.options.injectFault?.('after-delete-commit');
+    if (fault) throw fault;
+    await this.recoverDeletions();
+  }
+
+  async pruneBefore(timestamp: string): Promise<string[]> {
+    this.assertWritable();
+    const targets = (
+      this.requireDb()
+        .prepare(
+          "SELECT r.run_id FROM runs r LEFT JOIN retention k ON k.run_id=r.run_id WHERE r.updated_at < ? AND COALESCE(k.keep,0)=0 AND r.lifecycle NOT IN ('RUNNING','CREATED')",
+        )
+        .all(new Date(timestamp).toISOString()) as { run_id: string }[]
+    ).map((row) => row.run_id);
+    for (const id of targets) await this.deleteRun(id);
+    return targets;
+  }
+
+  private async recoverDeletions(): Promise<void> {
+    const rows = this.requireDb().prepare('SELECT run_id FROM deleted_runs').all() as { run_id: string }[];
+    for (const row of rows)
+      for (const area of ['runs', 'live', 'artifacts', 'evidence']) {
+        const path = join(this.dataRoot, area, row.run_id);
+        await assertLocalPath(this.dataRoot, path);
+        await rm(path, { recursive: true, force: true });
+      }
+  }
+
   /** Raw derived JSONL bytes (sanitized canonical lines only). */
   async readTraceJsonl(runId: string): Promise<string> {
+    await assertLocalPath(this.dataRoot, this.tracePath(runId));
     return readFile(this.tracePath(runId), 'utf8');
   }
 }
@@ -824,7 +1156,16 @@ function insertDiagnostic(db: DatabaseSync, runId: string, seq: number, d: Diagn
   db.prepare(
     `INSERT INTO diagnostics (run_id, seq, code, severity, message, line_index, byte_offset, event_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).run(runId, seq, d.code, d.severity, d.message, d.lineIndex ?? null, d.byteOffset ?? null, d.eventId ?? null);
+  ).run(
+    runId,
+    seq,
+    d.code,
+    d.severity,
+    d.message,
+    d.lineIndex ?? null,
+    d.byteOffset ?? null,
+    d.eventId ?? null,
+  );
 }
 
 function openDatabase(dbPath: string, readOnly: boolean): DatabaseSync {
@@ -870,11 +1211,10 @@ function readVersion(db: DatabaseSync): number {
     );
   }
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get() as
-    | { value: string }
-    | undefined;
+    { value: string } | undefined;
   if (row === undefined) {
     if (hasTable(db, 'vt_runs')) return 0;
-    throw new StoreError('NOT_A_VIEWTRACE_DB', "meta table exists but has no schema_version; refusing");
+    throw new StoreError('NOT_A_VIEWTRACE_DB', 'meta table exists but has no schema_version; refusing');
   }
   const version = Number(row.value);
   if (!Number.isInteger(version) || version < 0) {

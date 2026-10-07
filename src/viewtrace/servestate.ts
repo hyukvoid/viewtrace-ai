@@ -25,6 +25,8 @@ export interface ServiceFileInfo {
   readonly port: number;
   readonly token: string;
   readonly startedAt: string;
+  readonly reportPort?: number;
+  readonly reportToken?: string;
 }
 
 export function serviceFile(dataRoot: string): string {
@@ -54,16 +56,45 @@ export function parseServiceJson(text: string): ServiceFileInfo | null {
   const raw = parsed as Record<string, unknown>;
   const { protocolVersion, pid, bootId, port, token, startedAt } = raw;
   if (
-    typeof protocolVersion !== 'number' || protocolVersion !== SERVICE_PROTOCOL_VERSION ||
-    typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 ||
-    typeof bootId !== 'string' || bootId.length === 0 ||
-    typeof port !== 'number' || !Number.isInteger(port) || port <= 0 || port > 65535 ||
-    typeof token !== 'string' || token.length < 32 ||
-    typeof startedAt !== 'string' || startedAt.length === 0
+    typeof protocolVersion !== 'number' ||
+    protocolVersion !== SERVICE_PROTOCOL_VERSION ||
+    typeof pid !== 'number' ||
+    !Number.isInteger(pid) ||
+    pid <= 0 ||
+    typeof bootId !== 'string' ||
+    bootId.length === 0 ||
+    typeof port !== 'number' ||
+    !Number.isInteger(port) ||
+    port <= 0 ||
+    port > 65535 ||
+    typeof token !== 'string' ||
+    token.length < 32 ||
+    typeof startedAt !== 'string' ||
+    startedAt.length === 0
   ) {
     return null;
   }
-  return { protocolVersion, pid, bootId, port, token, startedAt };
+  const reportPort = raw['reportPort'];
+  const reportToken = raw['reportToken'];
+  if (
+    (reportPort !== undefined &&
+      (typeof reportPort !== 'number' ||
+        !Number.isInteger(reportPort) ||
+        reportPort < 1 ||
+        reportPort > 65535)) ||
+    (reportToken !== undefined && (typeof reportToken !== 'string' || reportToken.length < 32))
+  )
+    return null;
+  return {
+    protocolVersion,
+    pid,
+    bootId,
+    port,
+    token,
+    startedAt,
+    reportPort: reportPort as number | undefined,
+    reportToken: reportToken as string | undefined,
+  };
 }
 
 export async function readServiceFile(dataRoot: string): Promise<ServiceFileInfo | null> {

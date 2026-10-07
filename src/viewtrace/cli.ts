@@ -8,6 +8,8 @@
 import { reveal, reportMutation, reportConnection } from './reveal.js';
 import { parseAnswerContext } from './resolver.js';
 import { isValidRunId, isValidTimestamp } from './validate.js';
+import { answerAnalysisReport } from './report.js';
+import { ANALYSIS_MODES, type AnalysisMode, type AnalysisReportV1 } from './analysis-types.js';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rm } from 'node:fs/promises';
@@ -86,6 +88,13 @@ Batch/query (M0 commands, unchanged):
   viewtrace runs [--data-root <dir>] [--json]
   viewtrace replay <runId> [--data-root <dir>] [--json]
   viewtrace adapters [--json]
+
+Analysis (M3, incremental evidence analyzer & JEV v2):
+  viewtrace analyze <runId> [--answer <answerId>] [--mode <mode>]
+                    [--data-root <dir>] [--json]
+      Analyze observable evidence, mode lens, claims, conflicts, and
+      bounded advisory JEV v2 checkpoints for an answer. Prints concise
+      lanes (obs / rep / inf / ?) and evidence support status.
 
 Reveal (M2, reference adapter only):
   viewtrace [--receipt <id> | --agent <id> --session <id> --turn <id>]
@@ -168,6 +177,7 @@ const VALUE_FLAGS = new Set([
   '--hash-version',
   '--select',
   '--before',
+  '--mode',
 ]);
 const BOOLEAN_FLAGS = new Set(['--json', '--url-only', '--release']);
 
@@ -666,8 +676,119 @@ async function main(argv: readonly string[]): Promise<number> {
       const args = parseArgs(rest);
       return cmdReplay(args.positional[0], dataRootOf(args.flags), args.flags.get('json') === true);
     }
+    case 'analyze': {
+      const args = parseArgs(rest);
+      const runId = args.positional[0];
+      const answerId = typeof args.flags.get('answer') === 'string' ? (args.flags.get('answer') as string) : undefined;
+      const mode = typeof args.flags.get('mode') === 'string' ? (args.flags.get('mode') as string) : undefined;
+      return cmdAnalyze(runId, answerId, mode, dataRootOf(args.flags), args.flags.get('json') === true);
+    }
     default:
       return usage(`unknown command '${command}'`);
+  }
+}
+
+async function cmdAnalyze(
+  runId: string | undefined,
+  answerId: string | undefined,
+  overrideMode: string | undefined,
+  dataRoot: string,
+  json: boolean,
+): Promise<number> {
+  if (!runId || !isValidRunId(runId)) {
+    return usage('analyze requires a valid runId');
+  }
+  if (overrideMode !== undefined && !ANALYSIS_MODES.includes(overrideMode as AnalysisMode)) {
+    return usage(
+      `invalid --mode '${overrideMode}'; expected one of ${ANALYSIS_MODES.join(', ')}`,
+    );
+  }
+  const store = await ViewTraceStore.open({ dataRoot });
+  try {
+    const run = store.getRun(runId);
+    if (!run) {
+      process.stderr.write(`${PROGRAM}: run '${runId}' not found\n`);
+      return 1;
+    }
+    let targetAnswerId = answerId;
+    if (!targetAnswerId) {
+      const answers = store.recentAnswers(100).filter((a: { runId: string }) => a.runId === runId);
+      targetAnswerId = answers[0]?.answerId;
+    }
+    if (!targetAnswerId || !store.getAnswer(runId, targetAnswerId)) {
+      const available = store
+        .recentAnswers(100)
+        .filter((a: { runId: string }) => a.runId === runId)
+        .map((a: { answerId: string }) => a.answerId);
+      if (available.length === 0) {
+        process.stderr.write(
+          `${PROGRAM}: run '${runId}' has no answer receipts; nothing to analyze (analyze is answer-scoped)\n`,
+        );
+      } else {
+        process.stderr.write(
+          `${PROGRAM}: answer '${targetAnswerId}' not found in run '${runId}' (available: ${available.join(', ')})\n`,
+        );
+      }
+      return 1;
+    }
+    const report = await answerAnalysisReport(store, runId, targetAnswerId, {
+      overrideMode: overrideMode as AnalysisMode | undefined,
+    });
+    if (!report) {
+      process.stderr.write(`${PROGRAM}: analysis failed for answer '${targetAnswerId}' in run '${runId}'\n`);
+      return 1;
+    }
+    if (json) {
+      process.stdout.write(JSON.stringify(report, null, 2) + '\n');
+      return 0;
+    }
+    printAnalysisReport(report);
+    return 0;
+  } finally {
+    store.close();
+  }
+}
+
+function printAnalysisReport(report: AnalysisReportV1): void {
+  process.stdout.write(`Analysis Report [${report.schema}]\n`);
+  process.stdout.write(`  Run: ${report.scope.runId}  Answer: ${report.scope.answerId}\n`);
+  process.stdout.write(`  Scope boundary: ${report.scope.boundary}  Freshness: ${report.freshness.status}\n`);
+  process.stdout.write(`  Input revision: ${report.inputRevision.value.slice(0, 16)}… (${report.inputRevision.recordCount} events)\n`);
+  process.stdout.write(`  Support: ${report.support.status} (${report.support.reasonCodes.join(', ')})\n`);
+  process.stdout.write(`  Mode: ${report.lens.currentMode} [${report.lens.revisions[report.lens.revisions.length - 1]?.phase}]\n`);
+
+  let obs = 0, rep = 0, inf = 0, unk = 0;
+  for (const e of report.evidence) {
+    if (e.effectiveProvenance === 'VIEWTRACE_OBSERVED') obs++;
+    else if (e.effectiveProvenance === 'AGENT_REPORTED') rep++;
+    else if (e.effectiveProvenance === 'VIEWTRACE_INFERRED') inf++;
+    else unk++;
+  }
+  for (const c of report.claims) {
+    if (c.provenance === 'AGENT_REPORTED') rep++;
+    else if (c.provenance === 'VIEWTRACE_OBSERVED') obs++;
+    else if (c.provenance === 'VIEWTRACE_INFERRED') inf++;
+  }
+  unk += report.conflicts.filter((c) => c.status === 'DETECTED').length;
+
+  process.stdout.write(`  Lanes: obs:${obs}  rep:${rep}  inf:${inf}  ?:${unk}\n`);
+  process.stdout.write(`  Claims: ${report.claims.length} (${report.claims.filter((c) => c.importance === 'CORE').length} core)\n`);
+  for (const c of report.claims) {
+    process.stdout.write(`    - [${c.support}] ${c.text.slice(0, 70)}\n`);
+  }
+  if (report.conflicts.length > 0) {
+    process.stdout.write(`  Conflicts: ${report.conflicts.length}\n`);
+    for (const cf of report.conflicts) {
+      process.stdout.write(`    - [${cf.status}] conditionMatch:${cf.conditionMatch}\n`);
+    }
+  }
+  if (report.jevResults.length > 0) {
+    process.stdout.write(`  JEV v2 Advisory Checkpoints: ${report.jevResults.length}\n`);
+    for (const j of report.jevResults) {
+      process.stdout.write(
+        `    - ${j.checkpointId}: gain=${j.labels?.evidenceGain ?? 'N/A'} progress=${j.labels?.progress ?? 'N/A'} rethink=${j.labels?.rethinkNeeded ?? 'N/A'}\n`,
+      );
+    }
   }
 }
 

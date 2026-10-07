@@ -1,0 +1,40 @@
+{
+  "description": "Deterministic oracle for the 5 evidence support states",
+  "answers": {
+    "ans-strong": {
+      "runId": "run-state-strong",
+      "expectedSupport": "STRONGLY_SUPPORTED",
+      "expectedReasonCodes": ["ALL_CORE_CLAIMS_SUPPORTED"],
+      "claimsCount": 2,
+      "unresolvedConflicts": 0
+    },
+    "ans-partial": {
+      "runId": "run-state-partial",
+      "expectedSupport": "PARTIALLY_SUPPORTED",
+      "expectedReasonCodes": ["PARTIAL_CLAIM_SUPPORT"],
+      "claimsCount": 3,
+      "unresolvedConflicts": 0
+    },
+    "ans-insufficient": {
+      "runId": "run-state-insufficient",
+      "expectedSupport": "INSUFFICIENT_EVIDENCE",
+      "expectedReasonCodes": ["NO_ADMISSIBLE_SUPPORT"],
+      "claimsCount": 2,
+      "unresolvedConflicts": 0
+    },
+    "ans-conflicting": {
+      "runId": "run-state-conflicting",
+      "expectedSupport": "CONFLICTING_EVIDENCE",
+      "expectedReasonCodes": ["UNRESOLVED_CORE_CONFLICT"],
+      "claimsCount": 3,
+      "unresolvedConflicts": 1
+    },
+    "ans-unknown": {
+      "runId": "run-state-unknown",
+      "expectedSupport": "UNKNOWN",
+      "expectedReasonCodes": ["TARGET_UNKNOWN"],
+      "claimsCount": 0,
+      "unresolvedConflicts": 0
+    }
+  }
+}

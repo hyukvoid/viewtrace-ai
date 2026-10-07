@@ -1,0 +1,47 @@
+{
+  "description": "Deterministic oracle for the 7 mode projections and revision calibrations",
+  "answers": {
+    "ans-mode-explain": {
+      "runId": "run-mode-explain",
+      "expectedMode": "EXPLAIN",
+      "initialHypothesis": "EXPLAIN",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-compare": {
+      "runId": "run-mode-compare",
+      "expectedMode": "COMPARE",
+      "initialHypothesis": "COMPARE",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-decide": {
+      "runId": "run-mode-decide",
+      "expectedMode": "DECIDE",
+      "initialHypothesis": "DECIDE",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-assess": {
+      "runId": "run-mode-assess",
+      "expectedMode": "ASSESS",
+      "initialHypothesis": "ASSESS",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-verify": {
+      "runId": "run-mode-verify",
+      "expectedMode": "VERIFY",
+      "initialHypothesis": "VERIFY",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-ideate": {
+      "runId": "run-mode-ideate",
+      "expectedMode": "IDEATE",
+      "initialHypothesis": "IDEATE",
+      "observedPhase": "OBSERVED_CONFIRMATION"
+    },
+    "ans-mode-correction": {
+      "runId": "run-mode-correction",
+      "expectedMode": "COMPARE",
+      "initialHypothesis": "EXPLAIN",
+      "observedPhase": "OBSERVED_CORRECTION"
+    }
+  }
+}

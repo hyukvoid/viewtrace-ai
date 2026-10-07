@@ -1,0 +1,13 @@
+{
+  "description": "Deterministic oracle for JEV v2 semantic checkpoints and advisory labels",
+  "runId": "run-jev-checkpoints",
+  "answerId": "ans-jev",
+  "expectedTriggers": [
+    "NEW_BRANCH",
+    "SOURCE_CONCENTRATION_THRESHOLD",
+    "CONTRADICTION",
+    "PRE_RECOMMENDATION"
+  ],
+  "expectedSupportEffect": "NONE",
+  "budgetLimitAdhered": true
+}

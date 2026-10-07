@@ -8,9 +8,10 @@ import { join } from 'node:path';
 import { assertLocalPath } from './paths.js';
 import type { ViewTraceStore } from './store.js';
 import { isValidEventId, isValidRunId, isValidTimestamp } from './validate.js';
-import { answerReport, eventPage, pickerPage, runReport } from './report.js';
+import { answerAnalysisReport, answerReport, eventPage, pickerPage, runReport } from './report.js';
 import { parseAnswerContext, resolveAnswer } from './resolver.js';
 import { listAdapters } from './adapters.js';
+import { ANALYSIS_MODES, type AnalysisMode } from './analysis-types.js';
 
 export interface ReportServer {
   readonly port: number;
@@ -168,9 +169,13 @@ export async function startReportServer(
         return true;
       };
       const pageKeys = new Set(['limit', 'cursor', 'offset', 'selection']);
+      const isAnalysisPath = /\/analysis$/.test(path);
+      const allowedKeys = isAnalysisPath
+        ? new Set(['limit', 'cursor', 'offset', 'selection', 'mode'])
+        : pageKeys;
       if (path !== '/api/resolve')
         for (const key of url.searchParams.keys())
-          if (!pageKeys.has(key)) {
+          if (!allowedKeys.has(key)) {
             fail(400, 'UNKNOWN_QUERY');
             return;
           }
@@ -226,7 +231,7 @@ export async function startReportServer(
         send(200, answerReport(store, receipt.runId, receipt.answerId));
         return;
       }
-      const match = /^\/api\/runs\/([^/]+)(?:\/answers\/([^/]+))?(?:\/(events|keep))?$/.exec(path);
+      const match = /^\/api\/runs\/([^/]+)(?:\/answers\/([^/]+))?(?:\/(events|keep|analysis))?$/.exec(path);
       if (match) {
         const runId = match[1]!,
           answerId = match[2],
@@ -236,6 +241,30 @@ export async function startReportServer(
           return;
         }
         if (!auth()) return;
+        if (action === 'analysis') {
+          if (!answerId) {
+            fail(400, 'BAD_REQUEST');
+            return;
+          }
+          if (method !== 'GET') {
+            fail(405, 'METHOD_NOT_ALLOWED');
+            return;
+          }
+          const modeParam = url.searchParams.get('mode');
+          if (modeParam && !ANALYSIS_MODES.includes(modeParam as AnalysisMode)) {
+            fail(400, 'BAD_REQUEST');
+            return;
+          }
+          const report = await answerAnalysisReport(store, runId, answerId, {
+            overrideMode: (modeParam as AnalysisMode) || undefined,
+          });
+          if (!report) {
+            fail(404, 'NOT_FOUND');
+            return;
+          }
+          send(200, report);
+          return;
+        }
         if (method === 'DELETE' && !answerId && !action) {
           if (!mutAuth()) return;
           if (!store.getRun(runId)) {

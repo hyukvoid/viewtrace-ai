@@ -23,10 +23,17 @@
 
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
-import { chmod, mkdir, open, readFile, rename, rm, stat } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalize, contentHash } from './canonical.js';
+import type {
+  AnalysisReportV1,
+  IncrementalAnalysisStateV1,
+  JevCheckpointV2,
+  JevResultV2,
+} from './analysis-types.js';
 import { assertLocalPath } from './paths.js';
 import type { AnswerReceipt } from './answer.js';
 import { isValidRunId } from './validate.js';
@@ -1103,6 +1110,188 @@ export class ViewTraceStore {
   async readTraceJsonl(runId: string): Promise<string> {
     await assertLocalPath(this.dataRoot, this.tracePath(runId));
     return readFile(this.tracePath(runId), 'utf8');
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* M3 Artifact persistence (atomic writes under <dataRoot>/artifacts)  */
+  /* ------------------------------------------------------------------ */
+
+  async saveAnalysisReport(report: AnalysisReportV1): Promise<void> {
+    this.assertWritable();
+    const runId = report.scope.runId;
+    const answerId = report.scope.answerId;
+    const dir = join(this.dataRoot, 'artifacts', runId, 'answers', answerId);
+    await assertLocalPath(this.dataRoot, dir);
+    await mkdir(dir, { recursive: true });
+    await chmodIfPosix(dir, 0o700);
+    const targetFile = join(dir, 'analysis-report.json');
+    const tmpFile = join(dir, `.analysis-report.json.${randomBytes(6).toString('hex')}.tmp`);
+    await writeFile(tmpFile, JSON.stringify(report, null, 2), 'utf8');
+    await chmodIfPosix(tmpFile, 0o600);
+    await renameWithOverride(tmpFile, targetFile);
+  }
+
+  /**
+   * Distinguishes a missing artifact from a corrupt one: a corrupted report
+   * is surfaced as `corrupt` (never silently treated as "never analyzed").
+   */
+  async loadAnalysisReport(
+    runId: string,
+    answerId?: string,
+  ): Promise<
+    | { kind: 'missing' }
+    | { kind: 'ok'; report: AnalysisReportV1 }
+    | { kind: 'corrupt'; error: string }
+  > {
+    const targetAnswerId = answerId ?? this.recentAnswers(100).find((a) => a.runId === runId)?.answerId;
+    if (!targetAnswerId) return { kind: 'missing' };
+    const file = join(this.dataRoot, 'artifacts', runId, 'answers', targetAnswerId, 'analysis-report.json');
+    await assertLocalPath(this.dataRoot, file);
+    let content: string;
+    try {
+      content = await readFile(file, 'utf8');
+    } catch {
+      return { kind: 'missing' };
+    }
+    try {
+      return { kind: 'ok', report: JSON.parse(content) as AnalysisReportV1 };
+    } catch (e) {
+      return { kind: 'corrupt', error: String(e) };
+    }
+  }
+
+  async getAnalysisReport(runId: string, answerId?: string): Promise<AnalysisReportV1 | null> {
+    const loaded = await this.loadAnalysisReport(runId, answerId);
+    return loaded.kind === 'ok' ? loaded.report : null;
+  }
+
+  async saveAnalysisState(state: IncrementalAnalysisStateV1): Promise<void> {
+    this.assertWritable();
+    const scope = state.scopes[0];
+    if (!scope) throw new StoreError('DB_ERROR', 'analysis state requires a scope');
+    const dir = join(this.dataRoot, 'artifacts', scope.runId, 'answers', scope.answerId);
+    await assertLocalPath(this.dataRoot, dir);
+    await mkdir(dir, { recursive: true });
+    await chmodIfPosix(dir, 0o700);
+    const targetFile = join(dir, 'analysis-state.json');
+    const tmpFile = join(dir, `.analysis-state.json.${randomBytes(6).toString('hex')}.tmp`);
+    await writeFile(tmpFile, JSON.stringify(state, null, 2), 'utf8');
+    await chmodIfPosix(tmpFile, 0o600);
+    await renameWithOverride(tmpFile, targetFile);
+  }
+
+  async getAnalysisState(runId: string, answerId?: string): Promise<IncrementalAnalysisStateV1 | null> {
+    const targetAnswerId = answerId ?? this.recentAnswers(100).find((a) => a.runId === runId)?.answerId;
+    if (!targetAnswerId) return null;
+    const file = join(this.dataRoot, 'artifacts', runId, 'answers', targetAnswerId, 'analysis-state.json');
+    await assertLocalPath(this.dataRoot, file);
+    try {
+      const content = await readFile(file, 'utf8');
+      return JSON.parse(content) as IncrementalAnalysisStateV1;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw new StoreError('DB_ERROR', `corrupt analysis state for ${runId}/${targetAnswerId}: ${String(e)}`);
+    }
+  }
+
+  /** Events of one run by explicit event ids (bounded SQL IN chunks). */
+  getEventsByIds(runId: string, eventIds: readonly string[]): ViewTraceEvent[] {
+    if (eventIds.length === 0) return [];
+    const db = this.requireDb();
+    const out: ViewTraceEvent[] = [];
+    const stmt = db.prepare(
+      "SELECT canonical FROM records WHERE run_id = ? AND record_kind = 'event' AND record_id = ?",
+    );
+    for (const id of eventIds) {
+      const row = stmt.get(runId, id) as { canonical: string } | undefined;
+      if (row) out.push(JSON.parse(row.canonical) as ViewTraceEvent);
+    }
+    return out;
+  }
+
+  /** All events of one run, sequence-ordered, without a page cap. */
+  listRunEvents(runId: string): ViewTraceEvent[] {
+    const out: ViewTraceEvent[] = [];
+    let after = 0;
+    for (;;) {
+      const page = this.pageRecords(runId, after, 1000);
+      for (const r of page.records) {
+        if (r.recordKind === 'event') out.push(r as ViewTraceEvent);
+      }
+      if (page.nextCursor === null) break;
+      after = page.nextCursor;
+    }
+    return out;
+  }
+
+  /** Cheap scoped extent for freshness checks (no event bodies read). */
+  scopedEventStats(
+    runId: string,
+    receiptId?: string,
+  ): { count: number; maxSequence: number } {
+    const db = this.requireDb();
+    if (receiptId === undefined) {
+      const row = db
+        .prepare(
+          "SELECT COUNT(*) AS n, COALESCE(MAX(sequence), 0) AS m FROM records WHERE run_id = ? AND record_kind = 'event'",
+        )
+        .get(runId) as { n: number; m: number };
+      return { count: row.n, maxSequence: row.m };
+    }
+    const row = db
+      .prepare(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(r.sequence), 0) AS m FROM records r JOIN answer_events e ON e.event_id = r.record_id WHERE r.run_id = ? AND r.record_kind = 'event' AND e.receipt_id = ?",
+      )
+      .get(runId, receiptId) as { n: number; m: number };
+    return { count: row.n, maxSequence: row.m };
+  }
+
+  async saveJevCheckpoints(runId: string, checkpoints: readonly JevCheckpointV2[]): Promise<void> {
+    this.assertWritable();
+    const dir = join(this.dataRoot, 'artifacts', runId);
+    await assertLocalPath(this.dataRoot, dir);
+    await mkdir(dir, { recursive: true });
+    await chmodIfPosix(dir, 0o700);
+    const targetFile = join(dir, 'jev-checkpoints.json');
+    const tmpFile = join(dir, `.jev-checkpoints.json.${randomBytes(6).toString('hex')}.tmp`);
+    await writeFile(tmpFile, JSON.stringify(checkpoints, null, 2), 'utf8');
+    await chmodIfPosix(tmpFile, 0o600);
+    await renameWithOverride(tmpFile, targetFile);
+  }
+
+  async getJevCheckpoints(runId: string): Promise<readonly JevCheckpointV2[]> {
+    const file = join(this.dataRoot, 'artifacts', runId, 'jev-checkpoints.json');
+    await assertLocalPath(this.dataRoot, file);
+    try {
+      const content = await readFile(file, 'utf8');
+      return JSON.parse(content) as JevCheckpointV2[];
+    } catch {
+      return [];
+    }
+  }
+
+  async saveJevResults(runId: string, results: readonly JevResultV2[]): Promise<void> {
+    this.assertWritable();
+    const dir = join(this.dataRoot, 'artifacts', runId);
+    await assertLocalPath(this.dataRoot, dir);
+    await mkdir(dir, { recursive: true });
+    await chmodIfPosix(dir, 0o700);
+    const targetFile = join(dir, 'jev-results.json');
+    const tmpFile = join(dir, `.jev-results.json.${randomBytes(6).toString('hex')}.tmp`);
+    await writeFile(tmpFile, JSON.stringify(results, null, 2), 'utf8');
+    await chmodIfPosix(tmpFile, 0o600);
+    await renameWithOverride(tmpFile, targetFile);
+  }
+
+  async getJevResults(runId: string): Promise<readonly JevResultV2[]> {
+    const file = join(this.dataRoot, 'artifacts', runId, 'jev-results.json');
+    await assertLocalPath(this.dataRoot, file);
+    try {
+      const content = await readFile(file, 'utf8');
+      return JSON.parse(content) as JevResultV2[];
+    } catch {
+      return [];
+    }
   }
 }
 

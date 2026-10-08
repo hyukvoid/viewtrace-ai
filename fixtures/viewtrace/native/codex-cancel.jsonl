@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"codex-cancel-native-1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"codex-cancel-native-2","type":"agent_message","text":"I’ll search for the official Node.js `node:sqlite` documentation and read it to verify `DatabaseSync`’s behavior."}}
+{"type":"item.started","item":{"id":"codex-cancel-native-3","type":"web_search","query":"","action":{"type":"other"}}}

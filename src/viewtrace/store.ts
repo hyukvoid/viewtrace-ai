@@ -25,11 +25,13 @@ import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
 import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { canonicalize, contentHash } from './canonical.js';
 import type {
   AnalysisReportV1,
+  AnalysisInputSignature,
+  AnalyzerIdentity,
   IncrementalAnalysisStateV1,
   JevCheckpointV2,
   JevResultV2,
@@ -254,6 +256,29 @@ function hasTable(db: DatabaseSync, name: string): boolean {
 }
 
 export class ViewTraceStore {
+  // Small metadata only, never a second report/state copy. Atomic file replacement,
+  // external edits, deletion and input changes all invalidate reuse.
+  private readonly analysisSummaries = new Map<string, {
+    analyzer: AnalyzerIdentity; inputSignature: AnalysisInputSignature; support: string;
+    stateStamp: string; reportStamp: string;
+  }>();
+  private readonly pendingAnalysisSummaries = new Map<string, { analyzer: AnalyzerIdentity; inputSignature: AnalysisInputSignature; stateStamp: string }>();
+
+  private artifactStamp(path: string): string {
+    const s = statSync(path);
+    return `${s.ino}:${s.size}:${s.mtimeMs}:${s.ctimeMs}`;
+  }
+  analysisSummary(runId: string, answerId: string) {
+    const key = `${runId}/${answerId}`, cached = this.analysisSummaries.get(key);
+    if (!cached) return null;
+    const dir = join(this.dataRoot, 'artifacts', runId, 'answers', answerId);
+    try {
+      if (cached.stateStamp === this.artifactStamp(join(dir, 'analysis-state.json')) &&
+          cached.reportStamp === this.artifactStamp(join(dir, 'analysis-report.json'))) return cached;
+    } catch { /* absent or replaced artifact is not current */ }
+    this.analysisSummaries.delete(key);
+    return null;
+  }
   private db: DatabaseSync | null = null;
   private readonly now: () => string;
 
@@ -279,6 +304,9 @@ export class ViewTraceStore {
   }
 
   private static async openInternal(options: StoreOptions): Promise<ViewTraceStore | null> {
+    const rootPath = resolve(options.dataRoot);
+    if (process.platform === 'win32' && rootPath.startsWith('\\\\') && !/^\\\\\?\\[A-Za-z]:\\/.test(rootPath))
+      throw new StoreError('DB_READ_ONLY', 'UNC/network data roots are unsupported for SQLite WAL; choose a local drive');
     const store = new ViewTraceStore(options.dataRoot, options);
     const dbPath = join(options.dataRoot, 'viewtrace.db');
     await assertLocalPath(options.dataRoot, dbPath);
@@ -315,6 +343,13 @@ export class ViewTraceStore {
       return store;
     }
 
+    if (process.platform !== 'win32') {
+      const existingRoot = await stat(options.dataRoot).catch((e: NodeJS.ErrnoException) => {
+        if (e.code === 'ENOENT') return null; throw e;
+      });
+      if (existingRoot && existingRoot.uid === process.getuid?.() && (existingRoot.mode & 0o200) === 0)
+        throw new StoreError('DB_READ_ONLY', 'data root is read-only; refusing to add owner write permission');
+    }
     await mkdir(options.dataRoot, { recursive: true, mode: 0o700 });
     await chmodIfPosix(options.dataRoot, 0o700);
     for (const dir of ['runs', 'evidence', 'artifacts']) {
@@ -1126,9 +1161,17 @@ export class ViewTraceStore {
     await chmodIfPosix(dir, 0o700);
     const targetFile = join(dir, 'analysis-report.json');
     const tmpFile = join(dir, `.analysis-report.json.${randomBytes(6).toString('hex')}.tmp`);
-    await writeFile(tmpFile, JSON.stringify(report, null, 2), 'utf8');
+    await writeFile(tmpFile, JSON.stringify(report, null, 2), { encoding: 'utf8', mode: 0o600 });
     await chmodIfPosix(tmpFile, 0o600);
     await renameWithOverride(tmpFile, targetFile);
+    const key = `${runId}/${answerId}`, summary = this.pendingAnalysisSummaries.get(key);
+    if (summary && summary.stateStamp === this.artifactStamp(join(dir, 'analysis-state.json'))) {
+      this.analysisSummaries.delete(key);
+      this.analysisSummaries.set(key, { ...summary, support: report.support.status,
+        reportStamp: this.artifactStamp(targetFile) });
+      this.pendingAnalysisSummaries.delete(key);
+      if (this.analysisSummaries.size > 8) this.analysisSummaries.delete(this.analysisSummaries.keys().next().value!);
+    }
   }
 
   /**
@@ -1175,9 +1218,15 @@ export class ViewTraceStore {
     await chmodIfPosix(dir, 0o700);
     const targetFile = join(dir, 'analysis-state.json');
     const tmpFile = join(dir, `.analysis-state.json.${randomBytes(6).toString('hex')}.tmp`);
-    await writeFile(tmpFile, JSON.stringify(state, null, 2), 'utf8');
+    await writeFile(tmpFile, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
     await chmodIfPosix(tmpFile, 0o600);
     await renameWithOverride(tmpFile, targetFile);
+    const key = `${scope.runId}/${scope.answerId}`;
+    this.analysisSummaries.delete(key);
+    if (state.inputSignature) this.pendingAnalysisSummaries.set(key, {
+      analyzer: { ...state.analyzer }, inputSignature: { ...state.inputSignature }, stateStamp: this.artifactStamp(targetFile),
+    });
+    if (this.pendingAnalysisSummaries.size > 8) this.pendingAnalysisSummaries.delete(this.pendingAnalysisSummaries.keys().next().value!);
   }
 
   async getAnalysisState(runId: string, answerId?: string): Promise<IncrementalAnalysisStateV1 | null> {

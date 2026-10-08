@@ -21,7 +21,9 @@ import { fileURLToPath } from 'node:url';
 import { homedir } from 'node:os';
 
 import { controlRequest, probeService } from './control.js';
-import { getAdapter, REFERENCE_ADAPTER_ID } from './adapters.js';
+import { getAdapter, isSupportedAdapter, REFERENCE_ADAPTER_ID } from './adapters.js';
+import { isNativeAdapter } from './native.js';
+import { installHooks, uninstallHooks } from './hooks.js';
 import { ingestFile } from './ingest.js';
 import { runCommand } from './run.js';
 import {
@@ -72,7 +74,7 @@ Collector lifecycle:
       Ask the authenticated collector to shut down and wait for the exit.
       Never kills processes by pid; committed events are preserved.
 
-Live runs (M1 supports the reference JSONL adapter only):
+Live runs (reference JSONL, codex exec JSON, claude-code stream JSON):
   viewtrace run [--adapter <id>] [--json] [--latency-log <file>] \\
                 [--data-root <dir>] -- <producer command> [args...]
       Wrap an explicit producer. Producer contract: one ViewTrace JSON
@@ -80,14 +82,25 @@ Live runs (M1 supports the reference JSONL adapter only):
       belongs on stderr (stdout chatter counts as input loss and makes the
       run PARTIAL). The producer receives its identity in the environment:
       VIEWTRACE_RUN_ID and VIEWTRACE_DATA_ROOT. Its arguments are passed
-      verbatim — there is never a shell in between. Windows .cmd/.bat
-      producers are run via cmd.exe with quoted arguments.
+      verbatim for executables. Windows .cmd/.bat producers use cmd.exe;
+      %, ! and newline arguments are refused. Native adapters whitelist
+      public tool results and final answers before disk; native stderr
+      and prompt argv are omitted. Supply the native JSON flags yourself.
       Activity, provenance labels (reported/observed/inferred), warnings
       and the real terminal state are shown live; output is plain text
       with no ANSI escapes (identical when piped).
 
-Batch/query (M0 commands, unchanged):
-  viewtrace ingest <file.jsonl> [--data-root <dir>] [--json]
+Project capture (explicit Claude Code opt-in):
+  viewtrace capture install|uninstall --adapter claude-code --project <dir>
+                    [--data-root <dir>] [--windows-agent-on-wsl]
+      Install owned .viewtrace files, then launch Claude with
+      --settings .viewtrace/claude.settings.json. Existing agent settings
+      and history are preserved. Removal refuses modified owned files.
+      Windows Claude on WSL requires --windows-agent-on-wsl at install.
+
+Batch/query:
+  viewtrace ingest <file.jsonl> [--adapter <id>] [--agent-version <version>]
+                   [--run-id <id>] [--data-root <dir>] [--json]
   viewtrace runs [--data-root <dir>] [--json]
   viewtrace replay <runId> [--data-root <dir>] [--json]
   viewtrace adapters [--json]
@@ -117,7 +130,7 @@ Analysis (M3 incremental analyzer; M4 answer-first report rendering):
       --answer the latest receipt is monitored and later receipts never
       switch automatically. Zero ANSI escapes; identical when piped.
 
-Reveal (M2, reference adapter only):
+Reveal (saved receipts; native provider turn identity may be absent):
   viewtrace [--receipt <id> | --agent <id> --session <id> --turn <id>]
             [--answer-hash <sha256> --hash-version <policy>] [--url-only] [--json]
             [--select <receiptId|runId>] [--data-root <dir>]
@@ -201,8 +214,10 @@ const VALUE_FLAGS = new Set([
   '--mode',
   '--interval',
   '--max-wait',
+  '--project',
+  '--agent-version',
 ]);
-const BOOLEAN_FLAGS = new Set(['--json', '--url-only', '--release']);
+const BOOLEAN_FLAGS = new Set(['--json', '--url-only', '--release', '--windows-agent-on-wsl']);
 
 function parseArgs(argv: readonly string[], allowUnknown = false): CliArgs {
   const positional: string[] = [];
@@ -593,10 +608,9 @@ async function main(argv: readonly string[]): Promise<number> {
           ? (args.flags.get('adapter') as string)
           : REFERENCE_ADAPTER_ID;
       const adapter = getAdapter(adapterId);
-      if (adapter === null || adapter.status !== 'REFERENCE') {
+      if (adapter === null || !isSupportedAdapter(adapterId)) {
         process.stderr.write(
-          `${PROGRAM}: unsupported adapter '${adapterId}'. Supported live adapters: ${REFERENCE_ADAPTER_ID}. ` +
-            'Real agent research adapters land in M5 (see `viewtrace adapters`).\n',
+          `${PROGRAM}: unsupported adapter '${adapterId}'. See \`viewtrace adapters\` for verified capture paths.\n`,
         );
         return 2;
       }
@@ -609,6 +623,24 @@ async function main(argv: readonly string[]): Promise<number> {
             ? (args.flags.get('latency-log') as string)
             : undefined,
       });
+    }
+    case 'capture': {
+      const args = parseArgs(rest);
+      if (args.flags.get('adapter') !== 'claude-code' || typeof args.flags.get('project') !== 'string')
+        return usage('capture install|uninstall --adapter claude-code --project <directory> [--data-root <directory>]');
+      try {
+        if (args.positional[0] === 'install') {
+          const settings = await installHooks(args.flags.get('project') as string, dataRootOf(args.flags), args.flags.get('windows-agent-on-wsl') === true);
+          process.stdout.write(`Project capture settings: ${sanitizeForTerminal(settings, Number.MAX_SAFE_INTEGER)}\nStart the collector, then opt in with: claude --settings .viewtrace/claude.settings.json\n`);
+        } else if (args.positional[0] === 'uninstall') {
+          await uninstallHooks(args.flags.get('project') as string);
+          process.stdout.write('Project capture files removed; existing agent configuration/history preserved.\n');
+        } else return usage('capture requires install or uninstall');
+        return 0;
+      } catch (e) {
+        process.stderr.write(`viewtrace: ${sanitizeForTerminal(e instanceof Error ? e.message : String(e), 1000)}\n`);
+        return 1;
+      }
     }
     case 'open': {
       const args = parseArgs(rest);
@@ -664,8 +696,14 @@ async function main(argv: readonly string[]): Promise<number> {
       const args = parseArgs(rest);
       const input = args.positional[0];
       if (input === undefined) return usage('ingest requires a trace file path');
+      const adapterId = args.flags.get('adapter');
+      if (typeof adapterId === 'string' && adapterId !== REFERENCE_ADAPTER_ID && !isNativeAdapter(adapterId))
+        return usage('unsupported ingest adapter');
       try {
-        const outcome = await ingestFile(input, { dataRoot: dataRootOf(args.flags) });
+        const outcome = await ingestFile(input, { dataRoot: dataRootOf(args.flags),
+          adapterId: typeof adapterId === 'string' && isNativeAdapter(adapterId) ? adapterId : undefined,
+          agentVersion: typeof args.flags.get('agent-version') === 'string' ? args.flags.get('agent-version') as string : undefined,
+          runId: typeof args.flags.get('run-id') === 'string' ? args.flags.get('run-id') as string : undefined });
         if (args.flags.get('json') === true) {
           process.stdout.write(JSON.stringify(outcome, null, 2) + '\n');
         } else {

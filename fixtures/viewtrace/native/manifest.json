@@ -1,0 +1,120 @@
+{
+  "format": 1,
+  "fixtures": [
+    {
+      "file": "codex-normal.jsonl",
+      "adapterId": "codex",
+      "agentVersion": "0.160.1",
+      "os": "Linux x64 / WSL2",
+      "date": "2026-10-07 UTC",
+      "scenario": "normal",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 0,
+      "sha256": "6909476c61f679303813f9880e17d262d478e3692c135cb090459d8ca2445662",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    },
+    {
+      "file": "codex-compare.jsonl",
+      "adapterId": "codex",
+      "agentVersion": "0.160.1",
+      "os": "Linux x64 / WSL2",
+      "date": "2026-10-07 UTC",
+      "scenario": "compare",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 0,
+      "sha256": "f0049d2ac7b519e5fc62bb4d7ea3ca7ecebc95d1679faf7169bace5fadd1f330",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    },
+    {
+      "file": "codex-cancel.jsonl",
+      "adapterId": "codex",
+      "agentVersion": "0.160.1",
+      "os": "Linux x64 / WSL2",
+      "date": "2026-10-07 UTC",
+      "scenario": "cancel",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 0,
+      "sha256": "01058d30d1c87e3a26296d92bd8ff4b6385a0c308d433db8937df9d6b2067b4f",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    },
+    {
+      "file": "claude-normal-user.jsonl",
+      "adapterId": "claude-code",
+      "agentVersion": "2.1.121",
+      "os": "Windows x64 native executable via WSL2; capture host Linux x64",
+      "date": "2026-10-07 UTC",
+      "scenario": "normal-user",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 0,
+      "sha256": "1c8a2d3887a3f52f8809218b953b2e3fd75eac541219cf2fc61d03d0b66a356f",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    },
+    {
+      "file": "claude-compare.jsonl",
+      "adapterId": "claude-code",
+      "agentVersion": "2.1.121",
+      "os": "Windows x64 native executable via WSL2; capture host Linux x64",
+      "date": "2026-10-07 UTC",
+      "scenario": "compare",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 0,
+      "sha256": "2c0a2e8c19beadf73e4bfd05cc54c1db9dca6a9b8a3f61a901e0279239ddcce0",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    },
+    {
+      "file": "claude-normal.jsonl",
+      "adapterId": "claude-code",
+      "agentVersion": "2.1.121",
+      "os": "Windows x64 native executable via WSL2; capture host Linux x64",
+      "date": "2026-10-07 UTC",
+      "scenario": "normal",
+      "collection": "Actual installed authenticated native CLI, isolated public-source task; cancel sends SIGTERM at first native tool start",
+      "nativeExit": 1,
+      "sha256": "6c62aab0a89f463a08528bdb8e04daab4d055bb316998d66a38d662af18d96d5",
+      "removed": [
+        "private reasoning/signatures/credentials before disk",
+        "usage/model/host metadata",
+        "public result excerpts and quotations",
+        "native identity values replaced consistently within the fixture"
+      ],
+      "oracle": "Manual native-ID call/result and final-boundary review; final answer is opaque reported prose; no synthesized COMPARE/VERIFY/turnID"
+    }
+  ],
+  "notes": [
+    "These are minimized real runs, not generated research events.",
+    "Claude normal is the actual failed authentication attempt with settings excluded; normal-user reads existing user authentication.",
+    "Codex cancel emitted no turn.completed despite process exit0; interruption is not a final answer.",
+    "All provider turnIDs are absent in the observed exec/stream-json protocols.",
+    "CI replay establishes parser/transport behavior, not real model execution on another OS."
+  ]
+}

@@ -25,6 +25,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.browser.json",
     "test": "npm run build && node --test --test-concurrency=1 \"dist/test/**/*.test.js\"",
+    "verify:release": "node scripts/verify-release.mjs",
     "ui": "npm run build && node dist/src/cli.js ui",
     "demo": "npm run build && node dist/src/poc00-demo.js",
     "share": "npm run build && node dist/src/cli.js share",

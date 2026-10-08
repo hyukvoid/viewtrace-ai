@@ -1,6 +1,5 @@
 /**
- * `viewtrace run` wrapper (M1) — wraps an explicit reference producer and
- * nothing else (docs/MILESTONES.md §6).
+ * `viewtrace run` — explicit reference or native public-JSON producer wrapper.
  *
  * Pipeline: spawn producer (no shell) → sanitize stdout lines (declared
  * private-reasoning fields are stripped BEFORE anything touches disk) →
@@ -32,7 +31,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 
 import { controlRequest, probeService } from './control.js';
 import {
@@ -51,6 +50,9 @@ import type { LiveRunSnapshot } from './collector.js';
 import { validateRecord, stripPrivateReasoningFields } from './validate.js';
 import type { AdapterCapability } from './adapters.js';
 import type { Diagnostic, DuplicateInfo, RunLifecycle } from './types.js';
+import { isNativeAdapter, NativeCapture } from './native.js';
+import type { NativeAdapterId } from './native.js';
+import { JsonlChunkParser } from './jsonl.js';
 
 const DRAIN_TIMEOUT_MS = Number(process.env['VIEWTRACE_DRAIN_TIMEOUT_MS'] ?? 30_000);
 const DRAIN_POLL_MS = 150;
@@ -62,6 +64,7 @@ export interface RunCommandOptions {
   readonly adapter: AdapterCapability;
   readonly json: boolean;
   readonly latencyLogPath?: string;
+  readonly nativeAgentVersion?: string;
 }
 
 interface LatencyEntry {
@@ -94,9 +97,16 @@ function generateRunId(): string {
 function buildSpawn(
   command: string,
   args: readonly string[],
-): { file: string; args: string[] } {
+): { file: string; args: string[]; windowsVerbatimArguments?: boolean } {
   if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
-    return { file: process.env['ComSpec'] ?? 'cmd.exe', args: ['/d', '/s', '/c', command, ...args] };
+    if ([command, ...args].some(s => /[%!\r\n]/.test(s))) throw new Error('CMD_ARG_UNSUPPORTED');
+    const protect = (value: string) => value.replace(/[()\[\]^"<>&| ]/g, c => `^${c}`);
+    const npmShim = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i.test(command);
+    const quoted = args.map(value => {
+      const literal = `"${value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
+      const escaped = protect(literal); return npmShim ? protect(escaped) : escaped;
+    });
+    return { file: process.env['ComSpec'] ?? 'cmd.exe', args: ['/d', '/s', '/v:off', '/c', `"${protect(command)} ${quoted.join(' ')}"`], windowsVerbatimArguments: true };
   }
   return { file: command, args: [...args] };
 }
@@ -117,6 +127,22 @@ function terminalRecord(
     adapterVersion: adapter.version,
     detail,
   };
+}
+
+async function nativeAgentVersion(command: string, adapterId: NativeAdapterId): Promise<string | undefined> {
+  const spec = buildSpawn(command, ['--version']);
+  return new Promise(resolveVersion => {
+    const probe = spawn(spec.file, spec.args, { shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true, windowsVerbatimArguments: spec.windowsVerbatimArguments });
+    let output = '';
+    const timer = setTimeout(() => { probe.kill(); resolveVersion(undefined); }, 5000);
+    probe.stdout.on('data', (b: Buffer) => { if (output.length < 256) output += b.toString('utf8').slice(0, 256); });
+    probe.on('error', () => { clearTimeout(timer); resolveVersion(undefined); });
+    probe.on('close', code => {
+      clearTimeout(timer);
+      const match = adapterId === 'codex' ? /^codex-cli (\d+\.\d+\.\d+)/.exec(output.trim()) : /^(\d+\.\d+\.\d+) \(Claude Code\)/.exec(output.trim());
+      resolveVersion(code === 0 ? match?.[1] : undefined);
+    });
+  });
 }
 
 export async function runCommand(
@@ -144,6 +170,10 @@ export async function runCommand(
     );
     return 2;
   }
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(producerArgv[0] ?? '') && producerArgv.some(s => /[%!\r\n]/.test(s))) {
+    process.stderr.write('viewtrace: Windows .cmd/.bat argv containing %, ! or newlines is unsupported; invoke its JavaScript entrypoint with node to preserve literal argv\n');
+    return 2;
+  }
 
   const liveRoot = liveDir(options.dataRoot);
   let runId = generateRunId();
@@ -151,6 +181,11 @@ export async function runCommand(
     runId = generateRunId();
   }
   const runDirPath = join(liveRoot, runId);
+  const native = isNativeAdapter(options.adapter.adapterId);
+  if (isNativeAdapter(options.adapter.adapterId)) options = { ...options,
+    nativeAgentVersion: await nativeAgentVersion(producerArgv[0] ?? '', options.adapter.adapterId) };
+  // Native argv often contains the user's prompt. Pass it to the child, never persist/echo it.
+  const publicProducer = native ? [basename(producerArgv[0] ?? ''), '[arguments omitted]'] : producerArgv;
   const spoolPath = join(runDirPath, 'stream.jsonl');
   await mkdir(runDirPath, { recursive: true, mode: 0o700 });
   await writeFile(
@@ -160,7 +195,8 @@ export async function runCommand(
         runId,
         adapterId: options.adapter.adapterId,
         adapterVersion: options.adapter.version,
-        producerCommand: producerArgv,
+        producerCommand: publicProducer,
+        nativeAgentVersion: options.nativeAgentVersion,
         startedAt: new Date().toISOString(),
       },
       null,
@@ -175,14 +211,14 @@ export async function runCommand(
       type: 'run-started',
       runId,
       adapter: `${options.adapter.adapterId}@${options.adapter.version}`,
-      producer: producerArgv,
+      producer: publicProducer,
       dataRoot: options.dataRoot,
       servicePid: probe.health.pid,
     });
   } else {
     emit(`run ${runId} started`);
     emit(`  adapter:    ${options.adapter.adapterId}@${options.adapter.version}`);
-    emit(`  producer:   ${producerArgv.join(' ')}`);
+    emit(`  producer:   ${publicProducer.join(' ')}`);
     emit(`  data root:  ${options.dataRoot}`);
     emit(`  collector:  pid ${probe.health.pid} (127.0.0.1:${probe.info.port})`);
     emit(`  spool:      ${spoolPath}`);
@@ -201,6 +237,10 @@ export async function runCommand(
       shell: false,
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
+      windowsVerbatimArguments: spawnSpec.windowsVerbatimArguments,
+      // Own a POSIX process group so cancellation includes descendants.
+      // Windows keeps the real console and uses taskkill's process-tree boundary.
+      detached: process.platform !== 'win32',
       // The producer learns its identity through the environment — the
       // wrapper never rewrites record contents.
       env: {
@@ -215,22 +255,28 @@ export async function runCommand(
     return 127;
   }
 
+  let treeCleanup: Promise<void> | undefined;
+  let forceKillTimer: ReturnType<typeof setTimeout> | undefined;
+  const signalGroup = (signal: NodeJS.Signals): void => {
+    try { if (child.pid) process.kill(-child.pid, signal); } catch { /* group already gone */ }
+  };
   const onSignal = (signal: string): void => {
     if (cancelling) return;
     cancelling = true;
     cancelSignal = signal;
-    try {
-      child.kill(signal as NodeJS.Signals);
-    } catch {
-      /* already gone */
+    if (process.platform === 'win32') {
+      treeCleanup = new Promise(resolveCleanup => {
+        if (!child.pid) { resolveCleanup(); return; }
+        const killer = spawn(join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'taskkill.exe'),
+          ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore', windowsHide: true });
+        killer.on('error', () => { child.kill(); resolveCleanup(); });
+        killer.on('close', () => { child.kill(); resolveCleanup(); });
+      });
+    } else {
+      signalGroup(signal as NodeJS.Signals);
+      forceKillTimer = setTimeout(() => signalGroup('SIGKILL'), 5000);
+      forceKillTimer.unref();
     }
-    setTimeout(() => {
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        /* already gone */
-      }
-    }, 5000).unref();
   };
   process.on('SIGINT', () => onSignal('SIGINT'));
   process.on('SIGTERM', () => onSignal('SIGTERM'));
@@ -241,7 +287,7 @@ export async function runCommand(
   });
 
   const stdoutDone = pumpStdout(child, spool, runId, options, emit, emitJson, latencies);
-  const stderrDone = pumpStderr(child);
+  const stderrDone = pumpStderr(child, native);
 
   const exitInfo = await new Promise<{ code: number | null; signal: string | null }>((resolveExit) => {
     let settled = false;
@@ -255,7 +301,12 @@ export async function runCommand(
     // A spawn that never starts (ENOENT/EACCES) may never emit 'exit'.
     child.on('error', () => settle({ code: null, signal: null }));
   });
-  await Promise.all([stdoutDone, stderrDone]);
+  // Once the producer exits, stop remaining descendants before waiting for
+  // their inherited pipe handles. Otherwise a grandchild can hold capture open.
+  if (cancelling && process.platform !== 'win32') signalGroup('SIGKILL');
+  await treeCleanup;
+  const [nativeFailed] = await Promise.all([stdoutDone, stderrDone]);
+  if (forceKillTimer) clearTimeout(forceKillTimer);
 
   let lifecycle: RunLifecycle;
   let detail: string;
@@ -273,6 +324,10 @@ export async function runCommand(
     detail = `producer terminated by signal ${exitInfo.signal}`;
     const num = SIGNAL_NUMBERS[exitInfo.signal] ?? 0;
     exitCode = process.platform === 'win32' ? 1 : num > 0 ? 128 + num : 1;
+  } else if (nativeFailed) {
+    lifecycle = 'FAILED';
+    detail = 'native agent reported failure';
+    exitCode = exitInfo.code || 4;
   } else if (exitInfo.code === 0) {
     lifecycle = 'COMPLETED';
     detail = 'producer exited 0';
@@ -322,9 +377,12 @@ async function pumpStdout(
   emit: EmitFn,
   emitJson: EmitJsonFn,
   latencies: LatencyEntry[],
-): Promise<void> {
+): Promise<boolean> {
   const stdout = child.stdout;
-  if (stdout === null) return;
+  if (stdout === null) return false;
+  if (isNativeAdapter(options.adapter.adapterId)) {
+    return pumpNativeStdout(child, spool, runId, options.adapter.adapterId, options, emit, emitJson, latencies);
+  }
   let carry: Buffer = Buffer.alloc(0);
   let oversizedReported = false;
 
@@ -428,11 +486,57 @@ async function pumpStdout(
     // Framing completion: the producer's final line lacked its newline.
     await processLine(carry);
   }
+  return false;
 }
 
-async function pumpStderr(child: ChildProcess): Promise<void> {
+async function pumpNativeStdout(
+  child: ChildProcess, spool: FileHandle, runId: string, adapterId: NativeAdapterId,
+  options: RunCommandOptions, emit: EmitFn, emitJson: EmitJsonFn, latencies: LatencyEntry[],
+): Promise<boolean> {
+  const parser = new JsonlChunkParser();
+  const capture = new NativeCapture({ adapterId, runId, agentVersion: options.nativeAgentVersion });
+  const write = async (records: unknown[]) => {
+    for (const value of records) {
+      await spool.write(JSON.stringify(value) + '\n');
+      const outcome = validateRecord(value);
+      if (!outcome.ok) {
+        const code = (value as { code?: string }).code ?? 'NATIVE_MALFORMED';
+        if (options.json) emitJson({ type: 'activity', kind: 'warning', code });
+        else emit(`  · ${code}: collection is partial`);
+        continue;
+      }
+      const r = outcome.record;
+      if (r.recordKind === 'event') {
+        if (options.json) emitJson(activityJson(r)); else emit(formatEventLine(r));
+        latencies.push({ eventId: r.eventId, eventType: r.type, teedAt: Date.now(), displayedAt: Date.now() });
+      } else if (r.recordKind === 'answer') {
+        if (options.json) emitJson({ type: 'answer', receiptId: r.receiptId, answerId: r.answerId, runId, associationCapability: 'PARTIAL' });
+        else emit(`ANSWER ${r.answerId} — receipt ${r.receiptId}; provider turn identity unavailable`);
+      } else {
+        if (options.json) emitJson(runTransitionJson(r.lifecycle, r.detail)); else emit(formatRunLine(r.lifecycle, r.detail));
+      }
+    }
+  };
+  const flush = async () => {
+    const parsed = parser.take();
+    for (const _loss of parsed.losses) await write(capture.gap('NATIVE_MALFORMED'));
+    for (const line of parsed.lines) await write(capture.consume(line.value));
+  };
+  for await (const chunk of child.stdout!) { parser.push(chunk); await flush(); }
+  parser.finish(); await flush(); await write(capture.finish());
+  return capture.unsuccessful;
+}
+
+async function pumpStderr(child: ChildProcess, native = false): Promise<void> {
   const stderr = child.stderr;
   if (stderr === null) return;
+  if (native) {
+    // stderr has no public/secret field contract. Count and discard it rather than echo prompts/debug dumps.
+    let bytes = 0;
+    for await (const chunk of stderr) bytes += Buffer.byteLength(chunk);
+    if (bytes > 0) process.stderr.write(`[agent] ${bytes} stderr bytes omitted by native privacy boundary\n`);
+    return;
+  }
   let carry: Buffer = Buffer.alloc(0);
   const write = (text: string): void => {
     // Sanitized passthrough: the agent's own diagnostics, escape-free.

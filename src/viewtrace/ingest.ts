@@ -19,6 +19,10 @@ import { ViewTraceStore } from './store.js';
 import { parseJsonlFile } from './jsonl.js';
 import { validateRecord } from './validate.js';
 import { canonicalize } from './canonical.js';
+import { NativeCapture, captureDiagnostic, NATIVE_VERSION } from './native.js';
+import type { NativeAdapterId } from './native.js';
+import { randomUUID } from 'node:crypto';
+import { isValidRunId } from './validate.js';
 import type {
   CollectionCompleteness,
   Diagnostic,
@@ -35,6 +39,9 @@ export interface IngestOptions {
   readonly dataRoot: string;
   readonly now?: () => string;
   readonly maxLineBytes?: number;
+  readonly adapterId?: NativeAdapterId;
+  readonly runId?: string;
+  readonly agentVersion?: string;
 }
 
 export interface ReplayCheck {
@@ -64,6 +71,18 @@ export async function ingestFile(inputPath: string, options: IngestOptions): Pro
   const receivedAt = now();
 
   const parsed = await parseJsonlFile(inputPath, { maxLineBytes: options.maxLineBytes });
+  const nativeRunId = options.runId ?? `run-native-${randomUUID()}`;
+  if (options.adapterId && !isValidRunId(nativeRunId)) throw new Error('Invalid native run ID');
+  let lines = [...parsed.lines];
+  if (options.adapterId) {
+    const capture = new NativeCapture({ adapterId: options.adapterId, runId: nativeRunId, now, agentVersion: options.agentVersion });
+    lines = parsed.lines.flatMap(line => capture.consume(line.value).map(value => ({ ...line, value })));
+    const end = { lineIndex: parsed.lines.length + 1, byteOffset: parsed.totalBytes };
+    lines.push(...capture.finish().map(value => ({ ...end, value })), {
+      ...end, value: { recordKind: 'run', schemaVersion: 1, runId: nativeRunId,
+        occurredAt: now(), lifecycle: capture.lifecycle, adapterId: options.adapterId, adapterVersion: NATIVE_VERSION },
+    });
+  }
 
   const streamDiagnostics: Diagnostic[] = [];
   for (const loss of parsed.losses) {
@@ -79,7 +98,13 @@ export async function ingestFile(inputPath: string, options: IngestOptions): Pro
   const runs = new Map<string, RunAccumulator>();
   let rejectedCount = 0;
 
-  for (const line of parsed.lines) {
+  for (const line of lines) {
+    const captureGap = options.adapterId ? captureDiagnostic(line.value, nativeRunId, options.adapterId) : null;
+    if (captureGap) {
+      rejectedCount++;
+      streamDiagnostics.push({ ...captureGap, lineIndex: line.lineIndex, byteOffset: line.byteOffset });
+      continue;
+    }
     const outcome = validateRecord(line.value);
     if (!outcome.ok) {
       rejectedCount += 1;

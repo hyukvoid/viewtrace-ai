@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","session_id":"claude-normal-native-1","uuid":"claude-normal-native-2","claude_code_version":"2.1.121"}
+{"type":"assistant","session_id":"claude-normal-native-1","uuid":"claude-normal-native-3","parent_tool_use_id":null,"message":{"id":"claude-normal-native-4","role":"assistant","content":[{"type":"text","text":"Not logged in · Please run /login"}]}}
+{"type":"result","subtype":"success","is_error":true,"result":"Not logged in · Please run /login","session_id":"claude-normal-native-1","uuid":"claude-normal-native-5"}

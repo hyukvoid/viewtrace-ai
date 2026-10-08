@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { canonicalize } from './canonical.js';
 import type { ViewTraceStore } from './store.js';
 import { analyzeAnswer, checkAnalysisFreshness } from './analyzer/index.js';
-import { defaultAnalyzerIdentity, scopeIdsHash } from './analyzer/incremental.js';
+import { defaultAnalyzerIdentity, scopeIdsHash, signatureMatches } from './analyzer/incremental.js';
 import type { AnalysisInputSignature, AnalysisMode, AnalysisReportV1 } from './analysis-types.js';
 import type { CollectionCompleteness } from './types.js';
 
@@ -45,11 +45,13 @@ function storedSupportIfFresh(store: ViewTraceStore, runId: string, answerId: st
     const stateFile = join(store.dataRoot, 'artifacts', runId, 'answers', answerId, 'analysis-state.json');
     const reportFile = join(store.dataRoot, 'artifacts', runId, 'answers', answerId, 'analysis-report.json');
     if (!existsSync(stateFile) || !existsSync(reportFile)) return 'UNKNOWN';
-    const state = JSON.parse(readFileSync(stateFile, 'utf8')) as {
+    const cached = store.analysisSummary(runId, answerId);
+    const state = cached ?? JSON.parse(readFileSync(stateFile, 'utf8')) as {
       analyzer?: { analyzerVersion?: string; ruleSetVersion?: string };
       inputSignature?: AnalysisInputSignature;
     };
-    const report = JSON.parse(readFileSync(reportFile, 'utf8')) as { support?: { status?: string } };
+    const report = cached ? { support: { status: cached.support } } :
+      JSON.parse(readFileSync(reportFile, 'utf8')) as { support?: { status?: string } };
     const analyzer = defaultAnalyzerIdentity();
     if (
       state.analyzer?.analyzerVersion !== analyzer.analyzerVersion ||
@@ -142,6 +144,18 @@ export async function answerAnalysisReport(
   options?: { overrideMode?: AnalysisMode },
 ): Promise<AnalysisReportV1 | null> {
   if (!options?.overrideMode) {
+    const cached = store.analysisSummary(runId, answerId), receipt = cached && store.getAnswer(runId, answerId);
+    if (cached && receipt) {
+      const scopeIds = Array.isArray(receipt.eventIds)
+        ? Array.from(new Set([...receipt.eventIds, ...(receipt.sharedEventIds ?? [])])) : undefined;
+      const analyzer = defaultAnalyzerIdentity();
+      const current = syncInputSignature(store, runId, receipt.receiptId, scopeIds);
+      if (current && signatureMatches(cached.inputSignature, current) &&
+          cached.analyzer.analyzerVersion === analyzer.analyzerVersion && cached.analyzer.ruleSetVersion === analyzer.ruleSetVersion) {
+        const loaded = await store.loadAnalysisReport(runId, answerId);
+        if (loaded.kind === 'ok') return loaded.report;
+      }
+    }
     const freshness = await checkAnalysisFreshness(store, runId, answerId);
     if (freshness?.status === 'CURRENT') {
       const loaded = await store.loadAnalysisReport(runId, answerId);

@@ -64,16 +64,23 @@ describe('viewtrace CLI: help and version', () => {
 });
 
 describe('viewtrace CLI: adapters', () => {
-  it('lists the reference adapter as REFERENCE and agent adapters as PLANNED with UNKNOWN levels', async () => {
+  it('retains REFERENCE and distinguishes verified partial native paths from unavailable adapters', async () => {
     const { stdout, code } = await runCli(['adapters']);
     assert.equal(code, 0);
     assert.ok(stdout.includes('viewtrace-reference-jsonl'));
     assert.ok(stdout.includes('[REFERENCE]'));
     assert.ok(stdout.includes('codex'));
-    assert.ok(stdout.includes('[PLANNED]'));
+    assert.ok(stdout.includes('[SUPPORTED]'));
+    assert.ok(stdout.includes('[UNAVAILABLE]'));
     assert.ok(stdout.includes('UNKNOWN'), 'unverified capabilities must not claim YES');
-    const json = JSON.parse((await runCli(['adapters', '--json'])).stdout) as { status: string }[];
-    assert.ok(json.every((a) => a.status === 'REFERENCE' || a.status === 'PLANNED'));
+    const json = JSON.parse((await runCli(['adapters', '--json'])).stdout) as { adapterId: string; status: string; exactAssociation: string; events: Record<string, string> }[];
+    assert.equal(json.find(a => a.adapterId === 'viewtrace-reference-jsonl')?.status, 'REFERENCE');
+    for (const id of ['codex', 'claude-code']) {
+      const adapter = json.find(a => a.adapterId === id)!;
+      assert.equal(adapter.status, 'SUPPORTED'); assert.equal(adapter.exactAssociation, 'PARTIAL');
+      assert.equal(adapter.events.VERIFY, 'NO'); assert.equal(adapter.events.COMPARE, 'NO');
+    }
+    assert.equal(json.find(a => a.adapterId === 'opencode')?.status, 'UNAVAILABLE');
   });
 });
 

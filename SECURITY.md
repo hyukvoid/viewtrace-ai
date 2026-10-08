@@ -16,15 +16,20 @@ This repository ships two products with two data policies.
 
 ## ViewTrace AI — local storage, loopback-only collector and report, zero external network
 
-ViewTrace (`viewtrace` bin, M2 — AnswerReceipt & Local Reveal) is a **local-write,
+ViewTrace (`viewtrace` bin) is a **local-write,
 zero-external-network** product. Its inputs and outputs are strictly
 separated:
 
-- **Reads:** reference JSONL trace files you point it at, read-only. Original
+- **Reads:** reference or explicitly selected native public JSONL files, read-only. Original
   agent history files are inputs only and are never modified (tests verify
   checksums stay unchanged). The live wrapper (`viewtrace run`) spawns the
-  producer you name with its arguments passed verbatim — there is never a
-  shell in between, so producer arguments cannot be interpolated.
+  producer you name with literal executable arguments. Windows `.cmd`/`.bat`
+  launchers use `cmd.exe` with escaping; `%`, `!` and newline arguments are
+  refused. Invoke the JavaScript entrypoint with Node for those literals.
+  Native capture accepts only known public tool/result/final-answer fields;
+  it discards prompts, private thinking, unknown packet bodies and native
+  stderr before spooling. Unknown format/tool/version records produce fixed
+  diagnostic codes, never raw packet excerpts.
 - **Writes:** only inside one data root (default `~/.viewtrace`, override with
   `--data-root` or `VIEWTRACE_DATA_ROOT`):
   - `viewtrace.db` — the authoritative SQLite store (schema version 2,
@@ -37,7 +42,16 @@ separated:
     per-process token (mode 0600; the token never appears in URLs or logs)
   - `logs/service.log` — collector log (events and errors only, no tokens,
     no record content)
-  - `evidence/`, `artifacts/` — reserved for later milestones
+  - `evidence/`, `artifacts/` — local incremental analysis reports/state and
+    advisory JEV checkpoints, with the same private-field/credential boundary
+- **Explicit project integration:** `capture install --adapter claude-code`
+  creates only owned `.viewtrace` settings, launcher and manifest in the
+  selected project. Existing `.claude` settings and history are preserved.
+  Hooks save minimized calls/state and public results under the selected data
+  root; neither private thinking nor user prompts are persisted. Uninstall
+  checks owned-file hashes and refuses modified files. No global agent settings
+  or authentication are installed or copied. Hook launchers pin the installing
+  Node runtime/package path; reinstall after moving or replacing that installation.
 - **Permissions:** data root and subdirectories 0700, files 0600 (POSIX); the
   collector service also sets umask 077. On Windows, POSIX permission bits do
   not apply; files inherit the containing directory's ACLs — treat the
@@ -81,7 +95,10 @@ separated:
   opens are loopback connections to its own collector (verified by a
   network sentinel in the test suite; loopback uses are counted separately
   from violations). Source URLs found in traces are recorded values and are
-  never fetched automatically.
+  never fetched automatically. An explicitly launched external agent uses
+  its own credentials and may make network requests independently of ViewTrace.
+  The network-zero guarantee covers ViewTrace's collector, analyzer and report,
+  not the external agent process.
 - **What is stored:** validated trace records (research events, run
   lifecycle, provenance, sanitized source references), diagnostics and
   duplicate/conflict records. Declared private-reasoning fields
@@ -100,6 +117,8 @@ separated:
   No native addon, no third-party runtime dependency, no install scripts.
   All SQL uses parameter binding; the database is never deleted implicitly.
   Store/asset paths reject symlinks and junctions inside their local root.
+  UNC/network SQLite data roots are refused; native history on UNC shares
+  remains a read-only input. Existing read-only POSIX roots are not made writable.
   The collector service owns HTTP mutations; CLI queries open read-only
   connections and never run recovery.
 

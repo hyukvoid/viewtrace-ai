@@ -6,7 +6,7 @@
 
 import { after, before, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmod, mkdtemp, rm } from 'node:fs/promises';
+import { chmod, mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -39,6 +39,12 @@ describe('viewtrace run — reference producer E2E', () => {
 
   after(async () => {
     await downService(root).catch(() => undefined);
+    // SIGKILL intentionally bypasses wrapper cleanup. Tests own and reap the
+    // orphan producers they create; no background processes escape the suite.
+    for (const name of ['sleepy.pid', 'sleepy2.pid']) {
+      try { process.kill(Number(await readFile(join(producers, name), 'utf8')), 'SIGKILL'); }
+      catch { /* producer never started or already exited */ }
+    }
     if (process.env['VT_KEEP_ROOTS'] !== '1') {
       await rm(root, { recursive: true, force: true }).catch(() => undefined);
     }
@@ -246,6 +252,8 @@ run('COMPLETED');
       producers,
       'sleepy.mjs',
       `${producerHeader()}
+import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(join(producers, 'sleepy.pid'))}, String(process.pid));
 run('RUNNING');
 event('e1', 'SEARCH', { type: 'SEARCH', query: 'long', results: [] });
 setInterval(() => undefined, 1 << 30);
@@ -287,6 +295,8 @@ await new Promise(() => undefined);
       producers,
       'sleepy2.mjs',
       `${producerHeader()}
+import {writeFileSync} from 'node:fs';
+writeFileSync(${JSON.stringify(join(producers, 'sleepy2.pid'))}, String(process.pid));
 run('RUNNING');
 event('e1', 'SEARCH', { type: 'SEARCH', query: 'orphan', results: [] });
 setInterval(() => undefined, 1 << 30);

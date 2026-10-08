@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased — ViewTrace M3–M5 release candidate
+
+- Codex exec JSON 0.160.1 and Claude Code stream JSON 2.1.121 research
+  adapters: native call/result IDs, public SEARCH/READ results, final-answer
+  receipts, explicit scopes and honest missing-identity picker behavior.
+  Private reasoning, prompt argv, unknown packet bodies and native stderr
+  never enter the native spool. Missing results/version drift remain partial.
+- Explicit Claude project hooks with install/uninstall, preserved agent
+  configuration and owned-file modification checks. WSL capture of Windows
+  Claude requires an explicit installation option.
+- Minimized real native fixtures with version/OS/masking manifests; separate
+  live-agent verification and deterministic cross-platform replay coverage.
+- Shared incremental analyzer/JEV v2 and answer-first CLI/Web reports with
+  seven mode lenses, provenance, source ledger, graph and sanitized Raw view.
+- Bounded metadata cache avoids repeated large analysis-state reads while
+  file changes, missing artifacts and input revisions invalidate support.
+- Twelve CI jobs across Ubuntu, Windows, macOS ARM64/Intel and Node
+  22.13.0/22/24; offline packed CLI/Chromium, Unicode/space argv, real console
+  cancellation, permissions and filesystem release checks. UNC history is
+  readable; network SQLite roots and unsafe batch argv are refused.
+
 ## Unreleased — ViewTrace M2
 
 - Final public AnswerReceipt v1, immutable finalization, sanitized versioned
@@ -9,8 +30,7 @@
   auto-matches by hash, latest, cwd or timestamp.
 - Loopback report/API on 7331, paginated sanitized events, polling/stale
   recovery, Host/Origin/cookie/bearer/CSP boundaries, delete/keep/prune and
-  tombstone recovery. Evidence analysis and real agent research adapters
-  remain M3/M5 work.
+  tombstone recovery.
 - Mandatory actual HTTP/public-bin/Chromium DOM tests; no runtime dependencies.
 - Coherent collector snapshots and full drain confirmation prevent successful
   producers from returning exit 4 during finalization on Windows. Partial or

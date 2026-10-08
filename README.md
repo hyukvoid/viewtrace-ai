@@ -10,13 +10,15 @@
 > honest state. Final public receipts, safe answer resolution, a recent
 > picker and the answer-first loopback report are implemented. The shared
 > evidence analyzer supplies seven mode lenses, claim/evidence relationships,
-> source provenance and unresolved areas for CLI and Web inspection. Real agent
-> adapters are **not** supported yet (`viewtrace adapters` shows the honest
-> capability matrix). Requires Node >= 22.13 (built-in `node:sqlite`).
+> source provenance and unresolved areas for CLI and Web inspection. Codex exec
+> JSON and Claude Code stream JSON now have **partial, version-specific**
+> research adapters (`viewtrace adapters --json` lists capabilities and limits).
+> Requires Node >= 22.13 (built-in `node:sqlite`).
 >
 > - **Local-only.** Everything ViewTrace records lives under one data root
 >   (default `~/.viewtrace`); the runtime makes zero external network
->   requests — no cloud, accounts, telemetry or API keys. The collector's
+>   requests — no cloud, accounts, telemetry or API keys. An explicitly launched
+>   external agent uses its own authentication and network. The collector's
 >   control channel binds `127.0.0.1` only and requires a per-process token.
 > - **Original agent history files are read-only inputs** and are never
 >   modified. ViewTrace's own recordings are local writes under the data
@@ -43,8 +45,8 @@ public events and missing evidence. It does not generate another rationale.
 The report follows **Answer → Evidence → Process → Raw**. Association,
 collection completeness, evidence support and unresolved areas remain visible.
 
-The reference adapter is the only supported research/receipt producer. This
-demo reads a synthetic multi-turn fixture, not a real agent history:
+The reference adapter demonstrates the full event contract. This demo reads
+a synthetic multi-turn fixture:
 
 ```sh
 viewtrace up
@@ -65,6 +67,61 @@ viewtrace prune --before 2026-10-01T00:00:00Z
 viewtrace delete receipt-multi           # all answers + exports + artifacts
 viewtrace down
 ```
+
+Capture actual agents with their public JSON output enabled:
+
+```sh
+viewtrace up
+viewtrace run --adapter codex -- codex exec --json "Research a public source"
+viewtrace run --adapter claude-code -- claude -p --output-format stream-json --verbose "Research a public source"
+viewtrace --receipt <receipt-id-printed-by-capture> --url-only
+viewtrace --url-only
+# Read native JSON output without changing the original file:
+viewtrace ingest public-output.jsonl --adapter codex --agent-version 0.160.1
+```
+
+Native adapters map public SEARCH/READ results and an opaque final CLAIM.
+They do not infer COMPARE, VERIFY or other research events from prose.
+Missing results, unsupported tools, nested-agent output, version drift and
+missing turn boundaries remain diagnostic gaps. Private thinking, prompts,
+native debug metadata and native stderr are excluded before disk.
+
+| Capture path | Verified native version | Real agent execution verified locally | Answer association |
+| --- | --- | --- | --- |
+| `codex exec --json` wrapper | 0.160.1 | Linux x64 on WSL2 | Explicit receipt; session alone uses picker |
+| Claude `-p --output-format stream-json --verbose` wrapper | 2.1.121 | Windows x64 executable through WSL2, Linux capture host | Explicit receipt; session alone uses picker |
+| Claude project hooks | 2.1.121 | Windows executable through explicit WSL option, Linux capture host | Explicit receipt; session alone uses picker |
+
+Both observed native protocols supply session identity but omit provider
+turn identity. ViewTrace never invents it. Other versions remain partial
+until independently verified. ZCode/OpenCode research capture is unavailable;
+their legacy coding support below does not establish research support.
+
+For direct Claude launches, install project hooks explicitly:
+
+```sh
+viewtrace capture install --adapter claude-code --project .
+viewtrace up
+claude --settings .viewtrace/claude.settings.json
+viewtrace capture uninstall --adapter claude-code --project .
+```
+
+Installation owns only `.viewtrace/claude.settings.json`, its launcher and
+manifest. Existing `.claude` configuration/history stays byte-identical.
+Removal refuses modified owned files to preserve user edits. Windows Claude
+invoked from WSL requires `--windows-agent-on-wsl` during installation.
+Launch from the installed project and start the collector before capture.
+Direct Codex launches require the wrapper; they are not intercepted.
+
+The release matrix targets Ubuntu x64, Windows x64, macOS ARM64 and macOS
+Intel with Node 22.13.0, 22 and 24. CI verifies sanitized native replay,
+clean offline tarball installation, installed CLI and Chromium reports,
+permissions, Unicode/space paths and real-console Ctrl+C. Real-model live
+verification is limited to the local invocation/OS rows above. No agent
+credentials are copied to CI. Windows `.cmd`/`.bat` arguments containing
+`%`, `!` or newlines are refused; invoke a JS entrypoint with `node` when
+those literals are needed. UNC history files are readable; SQLite data roots
+must be on a local drive. Windows files inherit the containing directory ACL.
 
 Use `--data-root <dir>` on commands to isolate local recordings. `up` starts
 both collector and report; the default report port is 7331. An occupied port
@@ -191,7 +248,7 @@ against — no adapter was guessed.
 
 ## Quick start
 
-Requires **Node.js ≥ 20.11**.
+Requires **Node.js ≥ 22.13** for this package.
 
 ```bash
 npm install -g agent-pigeon

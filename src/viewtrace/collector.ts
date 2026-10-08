@@ -28,6 +28,7 @@ import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import { JsonlChunkParser } from './jsonl.js';
 import { validateRecord } from './validate.js';
+import { captureDiagnostic } from './native.js';
 import { liveDir } from './servestate.js';
 import type { ViewTraceStore } from './store.js';
 import type {
@@ -62,6 +63,7 @@ export interface LiveRunSnapshot {
 
 interface Watch {
   readonly runId: string;
+  readonly adapterId: string;
   readonly streamPath: string;
   parser: JsonlChunkParser;
   /** Absolute file offset that parser offsets are relative to. */
@@ -173,6 +175,7 @@ export class LiveCollector {
 
       const watch: Watch = {
         runId,
+        adapterId: meta.adapterId,
         streamPath: join(dir, 'stream.jsonl'),
         parser: new JsonlChunkParser(),
         resumeBase: cursor,
@@ -280,6 +283,11 @@ export class LiveCollector {
 
     const accepted: TraceRecord[] = [];
     for (const line of lines) {
+      const captureGap = captureDiagnostic(line.value, watch.runId, watch.adapterId);
+      if (captureGap) {
+        diagnostics.push({ ...captureGap, lineIndex: line.lineIndex, byteOffset: line.byteOffset });
+        continue;
+      }
       const outcome = validateRecord(line.value);
       if (!outcome.ok) {
         for (const error of outcome.errors) {
